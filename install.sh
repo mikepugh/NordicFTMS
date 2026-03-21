@@ -58,14 +58,21 @@ echo ""
 echo "Launching NordicFTMS..."
 "$ADB" shell am start -n com.nordicftms.app/.MainActivity
 
+# Wait for foreground service to fully start before switching apps
+sleep 3
+
+# Return to iFit interface
+echo ""
+echo "Returning to iFit..."
+"$ADB" shell am start -n com.ifit.mithlond/.view.SplashScreenActivity
+
 echo ""
 echo "==================================="
 echo "  Installation complete!"
 echo "==================================="
 echo ""
-echo "NordicFTMS is now running. It will auto-start on future reboots."
-echo "Open your FTMS app and scan for Bluetooth devices."
+echo "NordicFTMS is now running in the background."
+echo "It will auto-start on future reboots."
 echo ""
-echo "Once you confirm the FTMS service appears in your device list,"
-echo "reboot your treadmill/bike to return to the iFit screen."
+echo "Open your FTMS app and scan for Bluetooth devices."
 echo ""

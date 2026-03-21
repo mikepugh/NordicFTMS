@@ -369,11 +369,10 @@ public class GrpcControlService {
         distanceAsyncStub.distanceSubscription(Empty.getDefaultInstance(), new StreamObserver<DistanceData>() {
             @Override
             public void onNext(DistanceData data) {
-                // GlassOS reports distance as negative values — take absolute value
-                lastDistanceKm = Math.abs(data.getTotalDistanceKm());
-                if (lastDistanceKm > 0) {
-                    Log.d(LOG_TAG, "Distance: " + lastDistanceKm + " km (raw: " + data.getTotalDistanceKm() + ")");
-                }
+                // Use lastDistanceKm (session distance) — totalDistanceKm is a
+                // lifetime odometer that counts backwards on some machines
+                lastDistanceKm = data.getLastDistanceKm();
+                Log.d(LOG_TAG, "Distance: " + lastDistanceKm + " km (" + (int)(lastDistanceKm * 1000) + " m)");
             }
 
             @Override

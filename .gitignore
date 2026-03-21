@@ -36,3 +36,7 @@ google-services.json
 
 # Android Profiling
 *.hprof
+
+# Local build/test
+build-local.sh
+install/

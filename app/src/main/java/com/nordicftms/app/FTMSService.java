@@ -78,6 +78,11 @@ public class FTMSService extends Service {
     private Runnable notificationRunnable;
     private boolean controlGranted = false;
 
+    // Incline change tracking for Machine Status notifications
+    private double lastNotifiedIncline = Double.NaN;
+    private double ftmsTargetIncline = Double.NaN;
+    private static final double INCLINE_TOLERANCE = 0.3; // percent
+
     // gRPC client for hardware communication
     private GrpcControlService grpc;
 
@@ -415,6 +420,7 @@ public class FTMSService extends Service {
                     int inclRaw = readInt16LE(value, 1);
                     double inclination = inclRaw / 10.0;
                     Log.i(LOG_TAG, "Set target inclination: " + inclination + "% (via gRPC)");
+                    ftmsTargetIncline = inclination;
                     if (grpc != null) {
                         grpc.setIncline(inclination);
                     }
@@ -569,7 +575,7 @@ public class FTMSService extends Service {
             @Override
             public void run() {
                 sendDataNotifications();
-                handler.postDelayed(this, 1000);
+                handler.postDelayed(this, 500);
             }
         };
         handler.postDelayed(notificationRunnable, 1000);
@@ -586,6 +592,9 @@ public class FTMSService extends Service {
             return;
         }
 
+        // Check for manual incline change (hardware controls, not FTMS command)
+        checkForManualInclineChange();
+
         boolean isBike = grpc.isBikeDevice();
 
         for (BluetoothDevice device : new HashSet<>(subscribedDevices)) {
@@ -601,6 +610,66 @@ public class FTMSService extends Service {
                 }
             } catch (Exception e) {
                 Log.e(LOG_TAG, "Error sending notification to " + device.getAddress(), e);
+            }
+        }
+    }
+
+    /**
+     * Detects incline changes from hardware controls and sends a Machine Status
+     * notification (Target Inclination Changed, opcode 0x08). If the incline is
+     * moving toward the FTMS-commanded target, it's treated as an FTMS-initiated
+     * change. If it moves to a value that doesn't match the FTMS target, it's
+     * a manual override from hardware controls.
+     */
+    private void checkForManualInclineChange() {
+        double currentIncline = grpc.getLastInclinePercent();
+
+        if (Double.isNaN(lastNotifiedIncline)) {
+            lastNotifiedIncline = currentIncline;
+            return;
+        }
+
+        if (currentIncline == lastNotifiedIncline) {
+            return;
+        }
+
+        double previousIncline = lastNotifiedIncline;
+        lastNotifiedIncline = currentIncline;
+
+        // If FTMS has a target and current incline is moving toward it, skip notification
+        if (!Double.isNaN(ftmsTargetIncline)) {
+            double prevDistance = Math.abs(previousIncline - ftmsTargetIncline);
+            double currDistance = Math.abs(currentIncline - ftmsTargetIncline);
+
+            if (currDistance < prevDistance || currDistance <= INCLINE_TOLERANCE) {
+                // Moving toward or arrived at the FTMS target — not a manual change
+                if (currDistance <= INCLINE_TOLERANCE) {
+                    // Arrived at target, clear it
+                    ftmsTargetIncline = Double.NaN;
+                }
+                return;
+            }
+
+            // Moving away from FTMS target — this is a manual override
+            ftmsTargetIncline = Double.NaN;
+        }
+
+        // Manual change from hardware controls — notify connected devices
+        // FTMS Machine Status opcode 0x06 = Target Inclination Changed
+        // Parameter: int16 LE, resolution 0.1%
+        int inclRaw = (int) (currentIncline * 10);
+        byte[] status = new byte[3];
+        status[0] = 0x06;
+        writeInt16LE(status, 1, inclRaw);
+
+        Log.i(LOG_TAG, "Manual incline change detected: " + currentIncline + "% — sending Machine Status");
+
+        for (BluetoothDevice device : new HashSet<>(subscribedDevices)) {
+            try {
+                machineStatusCharacteristic.setValue(status);
+                gattServer.notifyCharacteristicChanged(device, machineStatusCharacteristic, false);
+            } catch (Exception e) {
+                Log.e(LOG_TAG, "Error sending Machine Status to " + device.getAddress(), e);
             }
         }
     }
