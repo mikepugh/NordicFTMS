@@ -53,11 +53,19 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# Launch the app once to enable auto-start on boot
+echo ""
+echo "Launching NordicFTMS..."
+"$ADB" shell am start -n com.nordicftms.app/.MainActivity
+
 echo ""
 echo "==================================="
 echo "  Installation complete!"
 echo "==================================="
 echo ""
-echo "Reboot your treadmill/bike to start NordicFTMS."
-echo "After reboot, open your FTMS app and scan for Bluetooth devices."
+echo "NordicFTMS is now running. It will auto-start on future reboots."
+echo "Open your FTMS app and scan for Bluetooth devices."
+echo ""
+echo "Once you confirm the FTMS service appears in your device list,"
+echo "reboot your treadmill/bike to return to the iFit screen."
 echo ""
