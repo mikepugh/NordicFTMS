@@ -50,7 +50,8 @@ jobs:
           mkdir -p NordicFTMS
           cp app/build/outputs/apk/debug/app-debug.apk NordicFTMS/NordicFTMS.apk
           cp install.sh NordicFTMS/install.sh
-          chmod +x NordicFTMS/install.sh
+          cp uninstall.sh NordicFTMS/uninstall.sh
+          chmod +x NordicFTMS/install.sh NordicFTMS/uninstall.sh
           cp pt-mac/platform-tools/adb NordicFTMS/adb
           chmod +x NordicFTMS/adb
           zip -r "NordicFTMS-${VERSION}-mac.zip" NordicFTMS/
@@ -62,7 +63,8 @@ jobs:
           mkdir -p NordicFTMS
           cp app/build/outputs/apk/debug/app-debug.apk NordicFTMS/NordicFTMS.apk
           cp install.sh NordicFTMS/install.sh
-          chmod +x NordicFTMS/install.sh
+          cp uninstall.sh NordicFTMS/uninstall.sh
+          chmod +x NordicFTMS/install.sh NordicFTMS/uninstall.sh
           cp pt-linux/platform-tools/adb NordicFTMS/adb
           chmod +x NordicFTMS/adb
           zip -r "NordicFTMS-${VERSION}-linux.zip" NordicFTMS/
@@ -74,6 +76,7 @@ jobs:
           mkdir -p NordicFTMS
           cp app/build/outputs/apk/debug/app-debug.apk NordicFTMS/NordicFTMS.apk
           cp install.bat NordicFTMS/install.bat
+          cp uninstall.bat NordicFTMS/uninstall.bat
           cp pt-windows/platform-tools/adb.exe NordicFTMS/adb.exe
           cp pt-windows/platform-tools/AdbWinApi.dll NordicFTMS/AdbWinApi.dll
           cp pt-windows/platform-tools/AdbWinUsbApi.dll NordicFTMS/AdbWinUsbApi.dll
