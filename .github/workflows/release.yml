@@ -83,12 +83,16 @@ jobs:
           zip -r "NordicFTMS-${VERSION}-windows.zip" NordicFTMS/
           rm -rf NordicFTMS
 
+      - name: Copy standalone APK for direct download
+        run: cp app/build/outputs/apk/debug/app-debug.apk NordicFTMS.apk
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: NordicFTMS v${{ steps.version.outputs.VERSION }}
           generate_release_notes: true
           files: |
+            NordicFTMS.apk
             NordicFTMS-${{ steps.version.outputs.VERSION }}-mac.zip
             NordicFTMS-${{ steps.version.outputs.VERSION }}-linux.zip
             NordicFTMS-${{ steps.version.outputs.VERSION }}-windows.zip
