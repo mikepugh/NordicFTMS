@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package com.ifit.glassos;
+
+option java_package = "com.ifit.glassos";
+option java_multiple_files = true;
+
+import "com/ifit/glassos/common.proto";
+
+message WattsData {
+  string workoutID = 1;
+  int32 timeSeconds = 2;
+  double lastWatts = 3;
+  double maxWatts = 4;
+  double avgWatts = 5;
+  double minWatts = 6;
+}
+
+service WattsService {
+  rpc GetWatts(Empty) returns (WattsData);
+  rpc WattsSubscription(Empty) returns (stream WattsData);
+  rpc CanRead(Empty) returns (BoolValue);
+}

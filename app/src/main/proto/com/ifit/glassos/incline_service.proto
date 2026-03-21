@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package com.ifit.glassos;
+
+option java_package = "com.ifit.glassos";
+option java_multiple_files = true;
+
+import "com/ifit/glassos/common.proto";
+
+message SetInclineRequest {
+  double percent = 1;
+}
+
+message InclineData {
+  string workoutID = 1;
+  int32 timeSeconds = 2;
+  double lastInclinePercent = 3;
+  double maxInclinePercent = 4;
+  double avgInclinePercent = 5;
+  double minInclinePercent = 6;
+}
+
+service InclineService {
+  rpc SetIncline(SetInclineRequest) returns (Result);
+  rpc GetIncline(Empty) returns (InclineData);
+  rpc InclineSubscription(Empty) returns (stream InclineData);
+  rpc CanRead(Empty) returns (BoolValue);
+  rpc CanWrite(Empty) returns (BoolValue);
+}

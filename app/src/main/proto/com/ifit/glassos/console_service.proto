@@ -1,0 +1,118 @@
+syntax = "proto3";
+
+package com.ifit.glassos;
+
+option java_package = "com.ifit.glassos";
+option java_multiple_files = true;
+
+import "com/ifit/glassos/common.proto";
+
+enum ConsoleState {
+  DISCONNECTED = 0;
+  CONSOLE_STATE_UNKNOWN = 1;
+  IDLE = 2;
+  WORKOUT = 3;
+  PAUSED = 4;
+  WORKOUT_RESULTS = 5;
+  SAFETY_KEY_REMOVED = 6;
+  WARM_UP = 7;
+  COOL_DOWN = 8;
+  RESUME = 9;
+  LOCKED = 10;
+  DEMO = 11;
+  SLEEP = 12;
+  ERROR = 13;
+}
+
+enum ConsoleType {
+  CONSOLE_TYPE_UNKNOWN = 0;
+  TREADMILL = 1;
+  INCLINE_TRAINER = 2;
+  ELLIPTICAL = 3;
+  BIKE = 4;
+  STRIDER = 5;
+  FREE_STRIDER = 6;
+  VERTICAL_ELLIPTICAL = 7;
+  SPIN_BIKE = 8;
+  ROWER = 9;
+  EQUIPMENTLESS = 10;
+  MIRROR = 11;
+  VIBRATION = 12;
+  REFORMER = 13;
+}
+
+enum SystemUnits {
+  SYSTEM_UNITS_UNKNOWN = 0;
+  METRIC = 1;
+  IMPERIAL = 2;
+}
+
+message ConsoleStateResponse {
+  ConsoleState consoleState = 1;
+}
+
+message ConsoleInfo {
+  int32 modelNumber = 1;
+  int32 partNumber = 2;
+  int32 softwareVersion = 3;
+  int32 hardwareVersion = 4;
+  string firmwareVersion = 5;
+  int32 serialNumber = 6;
+  ConsoleType machineType = 7;
+  string name = 8;
+  string brainboardSerialNumber = 9;
+  int32 masterLibraryVersion = 10;
+  int32 masterLibraryBuild = 11;
+  SystemUnits systemUnits = 12;
+  double maxKph = 13;
+  double minKph = 14;
+  double maxInclinePercent = 15;
+  double minInclinePercent = 16;
+  double minResistance = 17;
+  double maxResistance = 18;
+  int32 minGear = 19;
+  int32 maxGear = 20;
+  double maxWeightKg = 21;
+  bool canSetSpeed = 22;
+  bool canSetIncline = 23;
+  bool canSetResistance = 24;
+  bool canSetGear = 25;
+  bool canSetActivationLock = 26;
+  bool supportsVerticalGain = 27;
+  bool supportsVerticalNet = 28;
+  bool supportsStartRequested = 29;
+  bool supportsRequireStartRequested = 30;
+  bool supportsKeyPressObserved = 31;
+  bool supportsPulse = 32;
+  double totalTimeSeconds = 33;
+  double warmUpTimeoutSeconds = 34;
+  double coolDownTimeoutSeconds = 35;
+  double pauseTimeoutSeconds = 36;
+  double totalDistanceKm = 37;
+  bool isClubUnit = 38;
+  double weightKg = 39;
+  bool supportsConstantWatts = 40;
+  string antPlusBootloaderVersion = 41;
+  string antPlusSerialNumber = 42;
+  string antPlusDeviceNumber = 43;
+  string antPlusRelaySoftwareVersion = 44;
+  string productSerialNumber = 45;
+  string controller1SoftwareVersion = 46;
+  string controller1SoftwarePartNumber = 47;
+  string controller4SoftwareVersion = 48;
+  string controller4SoftwarePartNumber = 49;
+  string controller40SoftwareVersion = 50;
+  string controller40SoftwarePartNumber = 51;
+  string motorControllerVersion = 52;
+  string motorControllerType = 53;
+  bool hasDeviceUpdate = 54;
+  double resultsTimeoutSeconds = 55;
+}
+
+service ConsoleService {
+  rpc GetConsoleState(Empty) returns (ConsoleStateResponse);
+  rpc ConsoleStateChanged(Empty) returns (stream ConsoleStateResponse);
+  rpc GetConsole(Empty) returns (ConsoleInfo);
+  rpc ConsoleChanged(Empty) returns (stream ConsoleInfo);
+  rpc GetKnownConsoleInfo(Empty) returns (ConsoleInfo);
+}

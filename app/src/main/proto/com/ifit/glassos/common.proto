@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package com.ifit.glassos;
+
+option java_package = "com.ifit.glassos";
+option java_multiple_files = true;
+
+message Empty {}
+
+message BoolValue {
+  bool value = 1;
+}
+
+message WorkoutIdRequest {
+  string workoutID = 1;
+}
+
+message Result {
+  oneof error_or_success {
+    Error error = 1;
+    bool success = 2;
+  }
+}
+
+message Error {
+  string message = 1;
+  int32 code = 2;
+}

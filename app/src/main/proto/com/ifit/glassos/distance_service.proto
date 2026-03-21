@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package com.ifit.glassos;
+
+option java_package = "com.ifit.glassos";
+option java_multiple_files = true;
+
+import "com/ifit/glassos/common.proto";
+
+message DistanceData {
+  string workoutID = 1;
+  int32 timeSeconds = 2;
+  double lastDistanceKm = 3;
+  double totalDistanceKm = 4;
+}
+
+service DistanceService {
+  rpc GetDistance(Empty) returns (DistanceData);
+  rpc DistanceSubscription(Empty) returns (stream DistanceData);
+  rpc CanRead(Empty) returns (BoolValue);
+}

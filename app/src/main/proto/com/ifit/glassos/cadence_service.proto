@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package com.ifit.glassos;
+
+option java_package = "com.ifit.glassos";
+option java_multiple_files = true;
+
+import "com/ifit/glassos/common.proto";
+
+message CadenceData {
+  string workoutID = 1;
+  int32 timeSeconds = 2;
+  double lastRpm = 3;
+  double maxRpm = 4;
+  double avgRpm = 5;
+  double minRpm = 6;
+}
+
+service CadenceService {
+  rpc GetCadence(Empty) returns (CadenceData);
+  rpc CadenceSubscription(Empty) returns (stream CadenceData);
+  rpc CanRead(Empty) returns (BoolValue);
+}

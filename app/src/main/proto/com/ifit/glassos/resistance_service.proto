@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package com.ifit.glassos;
+
+option java_package = "com.ifit.glassos";
+option java_multiple_files = true;
+
+import "com/ifit/glassos/common.proto";
+
+message SetResistanceRequest {
+  double resistance = 1;
+}
+
+message ResistanceData {
+  string workoutID = 1;
+  int32 timeSeconds = 2;
+  double lastResistance = 3;
+  double maxResistance = 4;
+  double avgResistance = 5;
+  double minResistance = 6;
+}
+
+service ResistanceService {
+  rpc SetResistance(SetResistanceRequest) returns (Result);
+  rpc GetResistance(Empty) returns (ResistanceData);
+  rpc ResistanceSubscription(Empty) returns (stream ResistanceData);
+  rpc CanRead(Empty) returns (BoolValue);
+  rpc CanWrite(Empty) returns (BoolValue);
+}

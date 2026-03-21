@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package com.ifit.glassos;
+
+option java_package = "com.ifit.glassos";
+option java_multiple_files = true;
+
+import "com/ifit/glassos/common.proto";
+
+message SetSpeedRequest {
+  double kph = 1;
+}
+
+message SpeedData {
+  string workoutID = 1;
+  int32 timeSeconds = 2;
+  double lastKph = 3;
+  double maxKph = 4;
+  double avgKph = 5;
+  double minKph = 6;
+}
+
+service SpeedService {
+  rpc SetSpeed(SetSpeedRequest) returns (Result);
+  rpc GetSpeed(Empty) returns (SpeedData);
+  rpc SpeedSubscription(Empty) returns (stream SpeedData);
+  rpc CanRead(Empty) returns (BoolValue);
+  rpc CanWrite(Empty) returns (BoolValue);
+}

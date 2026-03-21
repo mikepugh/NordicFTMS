@@ -1,0 +1,91 @@
+name: Build Release Packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore mTLS certificates
+        run: |
+          mkdir -p app/src/main/assets/certs
+          echo "${{ secrets.GLASSOS_CA_CERT }}" | base64 -d > app/src/main/assets/certs/glassos_ca.pem
+          echo "${{ secrets.GLASSOS_CLIENT_CERT }}" | base64 -d > app/src/main/assets/certs/glassos_client_cert.pem
+          echo "${{ secrets.GLASSOS_CLIENT_KEY }}" | base64 -d > app/src/main/assets/certs/glassos_client_key.pem
+
+      - name: Build APK
+        run: chmod +x gradlew && ./gradlew assembleDebug
+
+      - name: Download ADB platform-tools
+        run: |
+          curl -sL https://dl.google.com/android/repository/platform-tools-latest-linux.zip -o pt-linux.zip
+          curl -sL https://dl.google.com/android/repository/platform-tools-latest-darwin.zip -o pt-mac.zip
+          curl -sL https://dl.google.com/android/repository/platform-tools-latest-windows.zip -o pt-windows.zip
+          unzip -q pt-linux.zip -d pt-linux
+          unzip -q pt-mac.zip -d pt-mac
+          unzip -q pt-windows.zip -d pt-windows
+
+      - name: Package Mac release
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          mkdir -p NordicFTMS
+          cp app/build/outputs/apk/debug/app-debug.apk NordicFTMS/NordicFTMS.apk
+          cp install.sh NordicFTMS/install.sh
+          chmod +x NordicFTMS/install.sh
+          cp pt-mac/platform-tools/adb NordicFTMS/adb
+          chmod +x NordicFTMS/adb
+          zip -r "NordicFTMS-${VERSION}-mac.zip" NordicFTMS/
+          rm -rf NordicFTMS
+
+      - name: Package Linux release
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          mkdir -p NordicFTMS
+          cp app/build/outputs/apk/debug/app-debug.apk NordicFTMS/NordicFTMS.apk
+          cp install.sh NordicFTMS/install.sh
+          chmod +x NordicFTMS/install.sh
+          cp pt-linux/platform-tools/adb NordicFTMS/adb
+          chmod +x NordicFTMS/adb
+          zip -r "NordicFTMS-${VERSION}-linux.zip" NordicFTMS/
+          rm -rf NordicFTMS
+
+      - name: Package Windows release
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          mkdir -p NordicFTMS
+          cp app/build/outputs/apk/debug/app-debug.apk NordicFTMS/NordicFTMS.apk
+          cp install.bat NordicFTMS/install.bat
+          cp pt-windows/platform-tools/adb.exe NordicFTMS/adb.exe
+          cp pt-windows/platform-tools/AdbWinApi.dll NordicFTMS/AdbWinApi.dll
+          cp pt-windows/platform-tools/AdbWinUsbApi.dll NordicFTMS/AdbWinUsbApi.dll
+          zip -r "NordicFTMS-${VERSION}-windows.zip" NordicFTMS/
+          rm -rf NordicFTMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: NordicFTMS v${{ steps.version.outputs.VERSION }}
+          generate_release_notes: true
+          files: |
+            NordicFTMS-${{ steps.version.outputs.VERSION }}-mac.zip
+            NordicFTMS-${{ steps.version.outputs.VERSION }}-linux.zip
+            NordicFTMS-${{ steps.version.outputs.VERSION }}-windows.zip
