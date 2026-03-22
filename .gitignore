@@ -40,3 +40,6 @@ google-services.json
 # Local build/test
 build-local.sh
 install/
+
+# Helper prompts
+prompts/
