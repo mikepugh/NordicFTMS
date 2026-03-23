@@ -36,6 +36,9 @@ import javax.jmdns.ServiceInfo;
  */
 public class DirconServer {
     private static final String LOG_TAG = "DIRCON";
+    private static final String GENERIC_DIRCON_SERVICE_NAME = "NordicFTMS";
+    private static final String GENERIC_MANUFACTURER_NAME = "NordicFTMS";
+    private static final String GENERIC_HARDWARE_REV = "1";
     private static final String KICKR_RUN_HARDWARE_REV = "4";
     private static final String KICKR_RUN_FIRMWARE_REV = "1.6.17";
 
@@ -130,8 +133,9 @@ public class DirconServer {
 
     // Fitness Machine Service characteristics
     private static final int CHAR_FM_FEATURE = 0x2ACC;
-    private static final int CHAR_FM_SUPPORTED_RANGE = 0x2AD6;
+    private static final int CHAR_FM_SUPPORTED_SPEED_RANGE = 0x2AD4;
     private static final int CHAR_FM_SUPPORTED_INCLINATION_RANGE = 0x2AD5;
+    private static final int CHAR_FM_SUPPORTED_RESISTANCE_RANGE = 0x2AD6;
     private static final int CHAR_FM_CONTROL_POINT = 0x2AD9;
     private static final int CHAR_TREADMILL_DATA = 0x2ACD;
     private static final int CHAR_INDOOR_BIKE_DATA = 0x2AD2;
@@ -458,13 +462,19 @@ public class DirconServer {
     private byte[] handleDiscoverServices(int seqNum) {
         ByteArrayOutputStream payload = new ByteArrayOutputStream();
         try {
-            // Match the real KICKR RUN service order exactly: 180A, EE01, EE0E, 1826, 1814, EE06
             payload.write(uuidToBytes(SVC_DEVICE_INFORMATION));
-            payload.write(SVC_WAHOO_EE01);
-            payload.write(SVC_WAHOO_PROPRIETARY);
             payload.write(uuidToBytes(SVC_FITNESS_MACHINE));
-            payload.write(uuidToBytes(SVC_RSC));
-            payload.write(SVC_WAHOO_EE06);
+            if (isTreadmillDirconProfile()) {
+                // Match the real KICKR RUN treadmill service order exactly:
+                // 180A, EE01, EE0E, 1826, 1814, EE06
+                payload = new ByteArrayOutputStream();
+                payload.write(uuidToBytes(SVC_DEVICE_INFORMATION));
+                payload.write(SVC_WAHOO_EE01);
+                payload.write(SVC_WAHOO_PROPRIETARY);
+                payload.write(uuidToBytes(SVC_FITNESS_MACHINE));
+                payload.write(uuidToBytes(SVC_RSC));
+                payload.write(SVC_WAHOO_EE06);
+            }
         } catch (IOException e) { /* ByteArrayOutputStream won't throw */ }
 
         int numServices = payload.size() / 16;
@@ -489,35 +499,44 @@ public class DirconServer {
             resp.write(payload, 0, 16);
 
             if (serviceUuid == SVC_DEVICE_INFORMATION) {
-                // Device Information Service — matching KICKR RUN
                 writeCharEntry(resp, CHAR_MANUFACTURER_NAME, PROP_READ);
                 writeCharEntry(resp, CHAR_SERIAL_NUMBER, PROP_READ);
                 writeCharEntry(resp, CHAR_HARDWARE_REVISION, PROP_READ);
                 writeCharEntry(resp, CHAR_FIRMWARE_REVISION, PROP_READ);
                 Log.i(LOG_TAG, "Discover Characteristics for DevInfo: 4 characteristics");
-            } else if (isWahooBase && serviceUuid == 0xEE01) {
+            } else if (isTreadmillDirconProfile() && isWahooBase && serviceUuid == 0xEE01) {
                 writeWahooCharEntry(resp, CHAR_WAHOO_E002, PROP_WRITE | PROP_NOTIFY);
                 writeWahooCharEntry(resp, CHAR_WAHOO_E004, PROP_NOTIFY);
                 writeWahooCharEntry(resp, CHAR_WAHOO_E03B, PROP_WRITE | PROP_NOTIFY);
                 Log.i(LOG_TAG, "Discover Characteristics for Wahoo 0xEE01: 3 characteristics");
-            } else if (isWahooBase && serviceUuid == 0xEE0E) {
+            } else if (isTreadmillDirconProfile() && isWahooBase && serviceUuid == 0xEE0E) {
                 // Wahoo proprietary service 0xEE0E — expose same chars as KICKR RUN
                 writeWahooCharEntry(resp, CHAR_WAHOO_E03E, PROP_WRITE | PROP_NOTIFY);
                 writeWahooCharEntry(resp, CHAR_WAHOO_E03D, PROP_NOTIFY);
                 writeWahooCharEntry(resp, CHAR_WAHOO_E040, PROP_NOTIFY);
                 Log.i(LOG_TAG, "Discover Characteristics for Wahoo 0xEE0E: 3 characteristics");
-            } else if (isWahooBase && serviceUuid == 0xEE06) {
+            } else if (isTreadmillDirconProfile() && isWahooBase && serviceUuid == 0xEE06) {
                 writeWahooCharEntry(resp, CHAR_WAHOO_E023, PROP_WRITE | PROP_NOTIFY);
                 writeWahooCharEntry(resp, CHAR_WAHOO_E018, PROP_WRITE | PROP_NOTIFY);
                 Log.i(LOG_TAG, "Discover Characteristics for Wahoo 0xEE06: 2 characteristics");
             } else if (serviceUuid == SVC_FITNESS_MACHINE) {
-                writeCharEntry(resp, CHAR_FM_FEATURE, PROP_READ);
-                writeCharEntry(resp, CHAR_FM_SUPPORTED_INCLINATION_RANGE, PROP_READ);
-                writeCharEntry(resp, CHAR_FM_CONTROL_POINT, PROP_WRITE | PROP_NOTIFY);
-                writeCharEntry(resp, CHAR_TREADMILL_DATA, PROP_NOTIFY);
-                writeCharEntry(resp, CHAR_MACHINE_STATUS, PROP_NOTIFY);
-                Log.i(LOG_TAG, "Discover Characteristics for FTMS: 5 characteristics");
-            } else if (serviceUuid == SVC_RSC) {
+                if (isTreadmillDirconProfile()) {
+                    writeCharEntry(resp, CHAR_FM_FEATURE, PROP_READ);
+                    writeCharEntry(resp, CHAR_FM_SUPPORTED_INCLINATION_RANGE, PROP_READ);
+                    writeCharEntry(resp, CHAR_FM_CONTROL_POINT, PROP_WRITE | PROP_NOTIFY);
+                    writeCharEntry(resp, CHAR_TREADMILL_DATA, PROP_NOTIFY);
+                    writeCharEntry(resp, CHAR_MACHINE_STATUS, PROP_NOTIFY);
+                    Log.i(LOG_TAG, "Discover Characteristics for FTMS treadmill profile: 5 characteristics");
+                } else {
+                    writeCharEntry(resp, CHAR_FM_FEATURE, PROP_READ);
+                    writeCharEntry(resp, CHAR_FM_SUPPORTED_SPEED_RANGE, PROP_READ);
+                    writeCharEntry(resp, CHAR_FM_SUPPORTED_RESISTANCE_RANGE, PROP_READ);
+                    writeCharEntry(resp, CHAR_FM_CONTROL_POINT, PROP_WRITE | PROP_NOTIFY);
+                    writeCharEntry(resp, CHAR_INDOOR_BIKE_DATA, PROP_NOTIFY);
+                    writeCharEntry(resp, CHAR_MACHINE_STATUS, PROP_NOTIFY);
+                    Log.i(LOG_TAG, "Discover Characteristics for FTMS generic profile: 6 characteristics");
+                }
+            } else if (isTreadmillDirconProfile() && serviceUuid == SVC_RSC) {
                 writeCharEntry(resp, CHAR_RSC_MEASUREMENT, PROP_NOTIFY);
                 writeCharEntry(resp, CHAR_RSC_FEATURE, PROP_READ);
                 Log.i(LOG_TAG, "Discover Characteristics for RSC: 2 characteristics");
@@ -555,16 +574,22 @@ public class DirconServer {
             switch (charUuid) {
                 // Device Information Service (0x180A)
                 case CHAR_MANUFACTURER_NAME: // 0x2A29
-                    data = "Wahoo Fitness".getBytes();
+                    data = isTreadmillDirconProfile()
+                            ? "Wahoo Fitness".getBytes()
+                            : GENERIC_MANUFACTURER_NAME.getBytes();
                     break;
                 case CHAR_SERIAL_NUMBER: // 0x2A25
                     data = getDirconSerialNumber().getBytes();
                     break;
                 case CHAR_HARDWARE_REVISION: // 0x2A27
-                    data = KICKR_RUN_HARDWARE_REV.getBytes();
+                    data = isTreadmillDirconProfile()
+                            ? KICKR_RUN_HARDWARE_REV.getBytes()
+                            : GENERIC_HARDWARE_REV.getBytes();
                     break;
                 case CHAR_FIRMWARE_REVISION: // 0x2A26
-                    data = KICKR_RUN_FIRMWARE_REV.getBytes();
+                    data = isTreadmillDirconProfile()
+                            ? KICKR_RUN_FIRMWARE_REV.getBytes()
+                            : BuildConfig.VERSION_NAME.getBytes();
                     break;
 
                 // Fitness Machine Service (0x1826)
@@ -575,8 +600,11 @@ public class DirconServer {
                     data = buildSupportedInclinationRange();
                     break;
 
-                case CHAR_FM_SUPPORTED_RANGE: // 0x2AD6 — Supported Speed Range
+                case CHAR_FM_SUPPORTED_SPEED_RANGE: // 0x2AD4
                     data = buildSupportedSpeedRange();
+                    break;
+                case CHAR_FM_SUPPORTED_RESISTANCE_RANGE: // 0x2AD6
+                    data = buildSupportedResistanceRange();
                     break;
                 case CHAR_TRAINING_STATUS: // 0x2AD3
                     data = new byte[]{0x00, 0x01}; // Idle
@@ -942,14 +970,12 @@ public class DirconServer {
             // Check for manual incline changes
             checkForManualInclineChange();
 
-            byte[] treadmillData = buildTreadmillData();
             byte[] indoorBikeData = buildIndoorBikeData();
+            byte[] treadmillData = buildTreadmillData();
             byte[] rscData = buildRscData();
-            byte[] heartRateData = buildHeartRateData();
-
-            // Wahoo proprietary status (0xE03D)
             byte[] wahooStatus = buildWahooStatus();
             byte[] wahooStatus2 = new byte[]{0x00, 0x00, 0x00, 0x00};
+            boolean treadmillProfile = isTreadmillDirconProfile();
 
             for (ClientState client : clients.values()) {
                 // Log subscribed characteristics on first broadcast to this client
@@ -958,17 +984,15 @@ public class DirconServer {
                     Log.i(LOG_TAG, "First broadcast to client. Subscriptions: " + client.notifySubscriptions);
                 }
 
-                // Send Wahoo E03D status first
-                sendWahooNotification(client, CHAR_WAHOO_E03D, 0xE03D, wahooStatus);
-                sendWahooNotification(client, CHAR_WAHOO_E03D, 0xE03D, wahooStatus2);
-
-                // FTMS data
-                sendNotification(client, CHAR_TREADMILL_DATA, treadmillData);
-                sendNotification(client, CHAR_INDOOR_BIKE_DATA, indoorBikeData);
-
-                // RSC and HR
-                sendNotification(client, CHAR_RSC_MEASUREMENT, rscData);
-                sendNotification(client, CHAR_HR_MEASUREMENT, heartRateData);
+                if (treadmillProfile) {
+                    // Send Wahoo E03D status first for the KICKR RUN treadmill profile.
+                    sendWahooNotification(client, CHAR_WAHOO_E03D, 0xE03D, wahooStatus);
+                    sendWahooNotification(client, CHAR_WAHOO_E03D, 0xE03D, wahooStatus2);
+                    sendNotification(client, CHAR_TREADMILL_DATA, treadmillData);
+                    sendNotification(client, CHAR_RSC_MEASUREMENT, rscData);
+                } else {
+                    sendNotification(client, CHAR_INDOOR_BIKE_DATA, indoorBikeData);
+                }
             }
         } catch (Exception e) {
             Log.e(LOG_TAG, "Error broadcasting notifications", e);
@@ -1103,10 +1127,9 @@ public class DirconServer {
     // --- Data Builders ---
 
     private byte[] buildFeatureValue() {
-        boolean isBike = grpc != null && grpc.isBikeDevice();
         byte[] value = new byte[8];
 
-        if (isBike) {
+        if (!isTreadmillDirconProfile()) {
             // Cadence + Speed + Power features
             value[0] = (byte) 0x83;
             value[1] = 0x14;
@@ -1142,10 +1165,26 @@ public class DirconServer {
     private byte[] buildSupportedSpeedRange() {
         // uint16 LE min (km/h*100), uint16 LE max (km/h*100), uint16 LE step (km/h*100)
         byte[] data = new byte[6];
-        writeUint16LE(data, 0, 0);      // min: 0 km/h
-        writeUint16LE(data, 2, 2200);   // max: 22 km/h (~13.7 mph)
+        writeUint16LE(data, 0, (int) (getMinSpeedKph() * 100));
+        writeUint16LE(data, 2, (int) (getMaxSpeedKph() * 100));
         writeUint16LE(data, 4, 10);     // step: 0.1 km/h
         return data;
+    }
+
+    private byte[] buildSupportedResistanceRange() {
+        byte[] data = new byte[6];
+        writeUint16LE(data, 0, (int) (getMinResistance() * 10));
+        writeUint16LE(data, 2, (int) (getMaxResistance() * 10));
+        writeUint16LE(data, 4, 10);     // step: 1.0
+        return data;
+    }
+
+    private double getMinSpeedKph() {
+        return grpc != null ? grpc.getMinSpeedKph() : 0.5;
+    }
+
+    private double getMaxSpeedKph() {
+        return grpc != null ? grpc.getMaxSpeedKph() : 22.0;
     }
 
     private double getMinInclinePercent() {
@@ -1154,6 +1193,14 @@ public class DirconServer {
 
     private double getMaxInclinePercent() {
         return grpc != null ? grpc.getMaxInclinePercent() : 40.0;
+    }
+
+    private double getMinResistance() {
+        return grpc != null ? grpc.getMinResistance() : 0.0;
+    }
+
+    private double getMaxResistance() {
+        return grpc != null ? grpc.getMaxResistance() : 30.0;
     }
 
     private byte[] buildTreadmillData() {
@@ -1277,10 +1324,10 @@ public class DirconServer {
 
             jmdns = JmDNS.create(address, "NordicFTMS");
 
-            // Build TXT record properties (full 128-bit UUID format like QZ default / KICKR RUN)
+            // Build TXT record properties. Treadmills expose the KICKR RUN-style
+            // Wahoo services; other machines publish a generic FTMS-only profile.
             Map<String, String> props = new HashMap<>();
-            // Match KICKR RUN exactly: only FTMS + RSC + Wahoo (no 0x180D — it prevents E03E/E03D advertising in Zwift)
-            props.put("ble-service-uuids", "0x1826,0x1814,A026EE0E-0A7D-4AB3-97FA-F1500F9FEB8B");
+            props.put("ble-service-uuids", getDirconBleServiceUuids());
 
             // Use WiFi MAC or a stable identifier
             String macAddress = getMacAddress(wifiManager);
@@ -1288,9 +1335,6 @@ public class DirconServer {
             String dirconSerialNumber = getDirconSerialNumber();
             props.put("serial-number", dirconSerialNumber);
 
-            // Use a KICKR RUN-style visible name for DIRCON discovery. Keeping
-            // it distinct from a real KICKR RUN on the same network avoids
-            // clients collapsing the two devices together.
             String serviceName = getDirconServiceName(macAddress);
 
             ServiceInfo serviceInfo = ServiceInfo.create(
@@ -1372,11 +1416,25 @@ public class DirconServer {
     }
 
     private String getDirconServiceName(String macAddress) {
+        if (!isTreadmillDirconProfile()) {
+            return GENERIC_DIRCON_SERVICE_NAME;
+        }
         String macHex = macAddress.replace("-", "");
         String suffix = macHex.length() >= 4
                 ? macHex.substring(macHex.length() - 4)
                 : "ABCD";
         return "KICKR RUN " + suffix;
+    }
+
+    private String getDirconBleServiceUuids() {
+        if (!isTreadmillDirconProfile()) {
+            return "0x1826";
+        }
+        return "0x1826,0x1814,A026EE0E-0A7D-4AB3-97FA-F1500F9FEB8B";
+    }
+
+    private boolean isTreadmillDirconProfile() {
+        return grpc != null && grpc.isTreadmillDevice();
     }
 
     // --- Packet Building ---
