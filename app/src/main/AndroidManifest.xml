@@ -14,8 +14,12 @@
     <!-- Foreground service for persistent BLE advertising -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
-    <!-- gRPC connection to GlassOS -->
+    <!-- gRPC connection to GlassOS + DIRCON TCP server -->
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- DIRCON: WiFi state for IP address and mDNS discovery -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <!-- Auto-start on boot -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />

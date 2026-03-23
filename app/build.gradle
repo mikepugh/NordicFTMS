@@ -58,6 +58,9 @@ dependencies {
     implementation 'com.google.android.material:material:1.4.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.0.4'
 
+    // jmDNS for DIRCON mDNS/Bonjour service advertisement
+    implementation 'org.jmdns:jmdns:3.5.9'
+
     // gRPC for GlassOS communication
     implementation 'io.grpc:grpc-okhttp:1.60.1'
     implementation 'io.grpc:grpc-protobuf-lite:1.60.1'

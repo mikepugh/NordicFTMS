@@ -86,6 +86,9 @@ public class FTMSService extends Service {
     // gRPC client for hardware communication
     private GrpcControlService grpc;
 
+    // DIRCON server for WiFi/TCP connectivity
+    private DirconServer dirconServer;
+
     private final Set<BluetoothDevice> subscribedDevices = new HashSet<>();
 
     private BluetoothGattCharacteristic treadmillDataCharacteristic;
@@ -115,6 +118,10 @@ public class FTMSService extends Service {
                 Log.w(LOG_TAG, "gRPC connection failed — BLE will advertise but data/control may not work");
             }
 
+            // Start DIRCON server (WiFi/TCP)
+            dirconServer = new DirconServer(FTMSService.this, grpc, FTMSService.this);
+            dirconServer.start();
+
             // Set up BLE on the main thread after gRPC connects
             handler.post(() -> {
                 setupGattServer();
@@ -140,6 +147,9 @@ public class FTMSService extends Service {
         stopNotificationLoop();
         stopAdvertising();
         closeGattServer();
+        if (dirconServer != null) {
+            dirconServer.stop();
+        }
         if (grpc != null) {
             grpc.disconnect();
         }
@@ -376,6 +386,14 @@ public class FTMSService extends Service {
         }
     };
 
+    /**
+     * Called by DirconServer when an incline command arrives via DIRCON,
+     * so the BLE side knows not to treat the resulting change as manual.
+     */
+    public void setFtmsTargetIncline(double incline) {
+        this.ftmsTargetIncline = incline;
+    }
+
     // --- Control Point ---
 
     private byte[] handleControlPoint(byte[] value) {
@@ -421,6 +439,10 @@ public class FTMSService extends Service {
                     double inclination = inclRaw / 10.0;
                     Log.i(LOG_TAG, "Set target inclination: " + inclination + "% (via gRPC)");
                     ftmsTargetIncline = inclination;
+                    // Notify DIRCON so it doesn't treat this as a manual change
+                    if (dirconServer != null) {
+                        dirconServer.setFtmsTargetIncline(inclination);
+                    }
                     if (grpc != null) {
                         grpc.setIncline(inclination);
                     }
@@ -671,6 +693,11 @@ public class FTMSService extends Service {
             } catch (Exception e) {
                 Log.e(LOG_TAG, "Error sending Machine Status to " + device.getAddress(), e);
             }
+        }
+
+        // Also notify DIRCON clients
+        if (dirconServer != null) {
+            dirconServer.sendMachineStatusToAll(status);
         }
     }
 
