@@ -37,6 +37,7 @@ import java.util.UUID;
 
 public class FTMSService extends Service {
     private static final String LOG_TAG = "FTMS";
+    private static final String ADVERTISED_DEVICE_NAME = "NordicFTMS";
 
     // FTMS UUIDs
     private static final UUID FTMS_SERVICE_UUID = UUID.fromString("00001826-0000-1000-8000-00805f9b34fb");
@@ -529,17 +530,9 @@ public class FTMSService extends Service {
             return;
         }
 
-        // Set BLE name based on detected machine type
-        String bleName = "FTMS Tread";
-        if (grpc != null) {
-            if (grpc.isBikeDevice()) {
-                bleName = "FTMS Bike";
-            } else if (grpc.isRower()) {
-                bleName = "FTMS Rower";
-            } else if (grpc.isElliptical()) {
-                bleName = "FTMS Ellip";
-            }
-        }
+        // Keep the BLE identity stable and simple across equipment types so
+        // users see the same name in both BLE and DIRCON pairing flows.
+        String bleName = ADVERTISED_DEVICE_NAME;
         adapter.setName(bleName);
 
         advertiser = adapter.getBluetoothLeAdvertiser();

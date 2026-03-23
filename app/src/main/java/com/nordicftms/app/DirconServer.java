@@ -36,7 +36,6 @@ import javax.jmdns.ServiceInfo;
  */
 public class DirconServer {
     private static final String LOG_TAG = "DIRCON";
-    private static final String KICKR_RUN_SERIAL = "243200029";
     private static final String KICKR_RUN_HARDWARE_REV = "4";
     private static final String KICKR_RUN_FIRMWARE_REV = "1.6.17";
 
@@ -559,7 +558,7 @@ public class DirconServer {
                     data = "Wahoo Fitness".getBytes();
                     break;
                 case CHAR_SERIAL_NUMBER: // 0x2A25
-                    data = KICKR_RUN_SERIAL.getBytes();
+                    data = getDirconSerialNumber().getBytes();
                     break;
                 case CHAR_HARDWARE_REVISION: // 0x2A27
                     data = KICKR_RUN_HARDWARE_REV.getBytes();
@@ -734,8 +733,11 @@ public class DirconServer {
                 if (data.length >= 3) {
                     int inclRaw = (data[1] & 0xFF) | ((data[2] & 0xFF) << 8);
                     if (inclRaw > 32767) inclRaw -= 65536; // sign extend
-                    double inclination = inclRaw / 10.0;
-                    Log.i(LOG_TAG, "Set incline: " + inclination + "% (DIRCON)");
+                    double requestedInclination = inclRaw / 10.0;
+                    double inclination = normalizeInclinePercent(requestedInclination);
+                    Log.i(LOG_TAG, String.format(
+                            "Set incline (DIRCON FTMS): requested=%.1f%% applied=%.1f%%",
+                            requestedInclination, inclination));
                     ftmsTargetIncline = inclination;
                     // Also notify FTMSService so BLE clients don't see this as manual
                     ftmsService.setFtmsTargetIncline(inclination);
@@ -844,15 +846,12 @@ public class DirconServer {
         // Decode slope from int16 LE (bytes 1-2), value = incline × 100
         int slopeRaw = (data[1] & 0xFF) | ((data[2] & 0xFF) << 8);
         if (slopeRaw > 32767) slopeRaw -= 65536; // sign extend
-        double inclinePercent = slopeRaw / 100.0;
-
-        // Clamp to treadmill's physical range
-        double minIncline = getMinInclinePercent();
-        double maxIncline = getMaxInclinePercent();
-        inclinePercent = Math.max(minIncline, Math.min(maxIncline, inclinePercent));
+        double requestedInclinePercent = slopeRaw / 100.0;
+        double inclinePercent = normalizeInclinePercent(requestedInclinePercent);
 
         Log.i(LOG_TAG, String.format(
-                "setSlope (0x11): raw=%d, incline=%.2f%%", slopeRaw, inclinePercent));
+                "setSlope (0x11): raw=%d, requested=%.2f%% applied=%.1f%%",
+                slopeRaw, requestedInclinePercent, inclinePercent));
 
         // Set FTMS target so manual incline detection doesn't fire
         ftmsTargetIncline = inclinePercent;
@@ -884,16 +883,12 @@ public class DirconServer {
 
         // Convert to incline percentage
         double gradeFloat = (((double) gradeEncoded / 65535.0) * 2.0) - 1.0;
-        double inclinePercent = gradeFloat * 100.0;
-
-        // Clamp to treadmill's physical range
-        double minIncline = getMinInclinePercent();
-        double maxIncline = getMaxInclinePercent();
-        inclinePercent = Math.max(minIncline, Math.min(maxIncline, inclinePercent));
+        double requestedInclinePercent = gradeFloat * 100.0;
+        double inclinePercent = normalizeInclinePercent(requestedInclinePercent);
 
         Log.i(LOG_TAG, String.format(
-                "setSimGrade: encoded=%d, grade=%.4f, incline=%.1f%%",
-                gradeEncoded, gradeFloat, inclinePercent));
+                "setSimGrade: encoded=%d, grade=%.4f, requested=%.2f%% applied=%.1f%%",
+                gradeEncoded, gradeFloat, requestedInclinePercent, inclinePercent));
 
         // Set FTMS target so manual incline detection doesn't fire
         ftmsTargetIncline = inclinePercent;
@@ -1290,11 +1285,13 @@ public class DirconServer {
             // Use WiFi MAC or a stable identifier
             String macAddress = getMacAddress(wifiManager);
             props.put("mac-address", macAddress);
-            props.put("serial-number", KICKR_RUN_SERIAL);
+            String dirconSerialNumber = getDirconSerialNumber();
+            props.put("serial-number", dirconSerialNumber);
 
-            // Present a KICKR RUN-style mDNS identity so Zwift's treadmill
-            // pairing flow sees a more familiar controllable device name.
-            String serviceName = "KICKR RUN ABCD";
+            // Use a KICKR RUN-style visible name for DIRCON discovery. Keeping
+            // it distinct from a real KICKR RUN on the same network avoids
+            // clients collapsing the two devices together.
+            String serviceName = getDirconServiceName(macAddress);
 
             ServiceInfo serviceInfo = ServiceInfo.create(
                     "_wahoo-fitness-tnp._tcp.local.",
@@ -1304,7 +1301,8 @@ public class DirconServer {
             );
 
             jmdns.registerService(serviceInfo);
-            Log.i(LOG_TAG, "mDNS registered as \"" + serviceName + "\" on port " + DIRCON_PORT);
+            Log.i(LOG_TAG, "mDNS registered as \"" + serviceName + "\" on port " + DIRCON_PORT
+                    + " serial=" + dirconSerialNumber);
 
         } catch (Exception e) {
             Log.e(LOG_TAG, "Failed to start mDNS", e);
@@ -1344,6 +1342,41 @@ public class DirconServer {
         } catch (Exception e) {
             return "AA-BB-CC-DD-EE-FF";
         }
+    }
+
+    private double normalizeInclinePercent(double requestedInclinePercent) {
+        double roundedInclinePercent = Math.round(requestedInclinePercent * 2.0) / 2.0;
+        double minIncline = getMinInclinePercent();
+        double maxIncline = getMaxInclinePercent();
+        return Math.max(minIncline, Math.min(maxIncline, roundedInclinePercent));
+    }
+
+    private String getDirconSerialNumber() {
+        WifiManager wifiManager = (WifiManager) context.getApplicationContext()
+                .getSystemService(Context.WIFI_SERVICE);
+        String macAddress = getMacAddress(wifiManager);
+
+        try {
+            byte[] hash = java.security.MessageDigest.getInstance("MD5")
+                    .digest(("NordicFTMS-DIRCON-" + macAddress).getBytes());
+            long serialValue = ((long) (hash[0] & 0xFF) << 24)
+                    | ((long) (hash[1] & 0xFF) << 16)
+                    | ((long) (hash[2] & 0xFF) << 8)
+                    | (hash[3] & 0xFF);
+            // Use a stable synthetic 9-digit numeric serial that cannot be
+            // confused with a copied hardware serial from a real device.
+            return String.format("9%08d", serialValue % 100000000L);
+        } catch (Exception e) {
+            return "999999999";
+        }
+    }
+
+    private String getDirconServiceName(String macAddress) {
+        String macHex = macAddress.replace("-", "");
+        String suffix = macHex.length() >= 4
+                ? macHex.substring(macHex.length() - 4)
+                : "ABCD";
+        return "KICKR RUN " + suffix;
     }
 
     // --- Packet Building ---
