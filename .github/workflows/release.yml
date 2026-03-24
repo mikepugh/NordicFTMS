@@ -33,6 +33,8 @@ jobs:
           echo "${{ secrets.GLASSOS_CLIENT_KEY }}" | base64 -d > app/src/main/assets/certs/glassos_client_key.pem
 
       - name: Build APK
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
         run: chmod +x gradlew && ./gradlew assembleDebug
 
       - name: Download ADB platform-tools
