@@ -14,18 +14,6 @@ If you found NordicFTMS useful and would like to support continued development
 
 ## How It Works
 
-```
-Your Phone/Tablet/Computer (PowerTread, Zwift, etc.)
-                 |
-      BLE FTMS or Wi-Fi DIRCON
-                 |
-   NordicFTMS app (on the built-in Android tablet)
-                 |
-             gRPC / mTLS
-                 |
-      GlassOS (machine hardware controller)
-```
-
 NordicFTMS communicates with the machine hardware through the GlassOS gRPC interface running on the machine's own Android system. It reads live metrics (speed, incline, distance, cadence, watts) via gRPC streaming subscriptions and broadcasts them over BLE FTMS or DIRCON. It also receives control commands (set speed, set incline, set resistance) and forwards them to the hardware via gRPC.
 
 ## Features
@@ -33,7 +21,7 @@ NordicFTMS communicates with the machine hardware through the GlassOS gRPC inter
 - **Zero configuration** — auto-starts on boot, auto-detects machine type (treadmill, bike, elliptical, rower)
 - **Standard BLE FTMS protocol** — works with any FTMS-compatible app
 - **DIRCON treadmill support** — supported treadmills can be discovered over Wi-Fi by apps that support Wahoo Direct Connect
-- **Bidirectional control** — read metrics AND control speed/incline/resistance from your phone
+- **Bidirectional control** — read metrics AND control incline/resistance from your phone
 - **Runs silently in background** — no user interaction needed after initial install
 - **Direct hardware communication** — uses gRPC to talk directly to GlassOS
 
@@ -45,9 +33,18 @@ For supported treadmills, NordicFTMS also advertises a DIRCON service on your lo
 
 In practice, that means:
 
-- Use the BLE `NordicFTMS` peripheral for standard FTMS connections.
-- On treadmills, look for `KICKR RUN <id>` in Zwift's DIRCON device list.
-- In Zwift run mode, it can connect as both the running-speed source and a **Controllable** treadmill for incline changes.
+- When running on Zwift, first connect the RUN SPEED device which should show as `KICKR RUN <id>`
+- Then connect the same `KICKR RUN <id>` within the CONTROLLABLE device. 
+- Zwift will prompt you to allow incline control, be sure to allow it.
+- Start running on Zwift!
+- At any time you can manually set the incline on your treadmill and Zwift should relinquish control. Use the Zwift UI to re-enable control if and when desired.
+
+> [CAUTION]
+>
+> Always remain in control of your treadmill and follow all safety precautions.
+> Zwift can command steep inclines, especially on NordicTrack X-series treadmills with very high incline capability.
+> If needed, manually change the incline and Zwift should relinquish control.
+
 
 ## Supported Data
 
