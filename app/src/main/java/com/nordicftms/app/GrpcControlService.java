@@ -221,8 +221,10 @@ public class GrpcControlService {
             Log.i(LOG_TAG, "  Can set resistance: " + consoleInfo.getCanSetResistance());
             Log.i(LOG_TAG, "  Firmware: " + consoleInfo.getFirmwareVersion());
             Log.i(LOG_TAG, "  Serial: " + consoleInfo.getProductSerialNumber());
+            SentryDiagnostics.recordConsoleInfo(consoleInfo, machineType);
         } catch (Exception e) {
             Log.e(LOG_TAG, "Failed to fetch console info", e);
+            SentryDiagnostics.recordConsoleInfoFailure(e);
         }
     }
 

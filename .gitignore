@@ -43,3 +43,5 @@ install/
 
 # Helper prompts
 prompts/
+# Sentry Config File
+sentry.properties

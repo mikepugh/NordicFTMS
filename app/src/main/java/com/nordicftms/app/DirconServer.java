@@ -11,6 +11,7 @@ import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketAddress;
 import java.nio.ByteOrder;
 import java.util.ArrayDeque;
 import java.util.HashMap;
@@ -19,6 +20,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
@@ -191,7 +193,10 @@ public class DirconServer {
     private double ftmsTargetIncline = Double.NaN;
     private boolean controlGranted = false;
     private static final double INCLINE_TOLERANCE = 0.3;
-
+    private static final long MANUAL_OVERRIDE_IGNORE_MS = 5000L;
+    private static final long MANUAL_OVERRIDE_REASSERT_DELAY_MS = 750L;
+    private volatile boolean manualOverrideStatusActive = false;
+    private volatile long manualOverrideIgnoreUntilMs = 0L;
     /**
      * Per-client state tracking for DIRCON connections.
      */
@@ -732,6 +737,7 @@ public class DirconServer {
     private byte[] processFtmsCommand(byte opcode, byte[] data) {
         switch (opcode) {
             case OP_REQUEST_CONTROL:
+                clearManualOverrideStatus("FTMS Request Control");
                 controlGranted = true;
                 Log.i(LOG_TAG, "Control granted (DIRCON)");
                 return new byte[]{(byte) 0x80, opcode, 0x01};
@@ -766,6 +772,10 @@ public class DirconServer {
                     Log.i(LOG_TAG, String.format(
                             "Set incline (DIRCON FTMS): requested=%.1f%% applied=%.1f%%",
                             requestedInclination, inclination));
+                    if (shouldIgnoreIncomingInclineCommand(
+                            "DIRCON FTMS", requestedInclination, inclination)) {
+                        return new byte[]{(byte) 0x80, opcode, 0x01};
+                    }
                     ftmsTargetIncline = inclination;
                     // Also notify FTMSService so BLE clients don't see this as manual
                     ftmsService.setFtmsTargetIncline(inclination);
@@ -880,6 +890,10 @@ public class DirconServer {
         Log.i(LOG_TAG, String.format(
                 "setSlope (0x11): raw=%d, requested=%.2f%% applied=%.1f%%",
                 slopeRaw, requestedInclinePercent, inclinePercent));
+        if (shouldIgnoreIncomingInclineCommand(
+                "Wahoo E03E 0x11", requestedInclinePercent, inclinePercent)) {
+            return;
+        }
 
         // Set FTMS target so manual incline detection doesn't fire
         ftmsTargetIncline = inclinePercent;
@@ -917,6 +931,10 @@ public class DirconServer {
         Log.i(LOG_TAG, String.format(
                 "setSimGrade: encoded=%d, grade=%.4f, requested=%.2f%% applied=%.1f%%",
                 gradeEncoded, gradeFloat, requestedInclinePercent, inclinePercent));
+        if (shouldIgnoreIncomingInclineCommand(
+                "Wahoo E0x46", requestedInclinePercent, inclinePercent)) {
+            return;
+        }
 
         // Set FTMS target so manual incline detection doesn't fire
         ftmsTargetIncline = inclinePercent;
@@ -969,6 +987,7 @@ public class DirconServer {
         try {
             // Check for manual incline changes
             checkForManualInclineChange();
+            clearManualOverrideStatusIfExpired("deadband timeout");
 
             byte[] indoorBikeData = buildIndoorBikeData();
             byte[] treadmillData = buildTreadmillData();
@@ -1032,12 +1051,45 @@ public class DirconServer {
      */
     private byte[] buildWahooStatus() {
         return new byte[]{
-                (byte) 0xFF, 0x01, 0x00, 0x00, 0x00, 0x00,
+                (byte) 0xFF, (byte) (manualOverrideStatusActive ? 0x00 : 0x01), 0x00, 0x00, 0x00, 0x00,
                 (byte) 0xD9, 0x53, (byte) 0xE4, 0x00,
                 0x00, 0x00, 0x00, 0x00,
                 (byte) 0xEE, (byte) 0xEF,
                 0x00, 0x00, 0x00, 0x00
         };
+    }
+
+    /**
+     * Build the unsolicited KICKR RUN E03E manual-override event observed on
+     * real hardware when a user presses a physical incline button:
+     *   FD 02 <int16_le incline_x100> 00
+     */
+    private byte[] buildWahooManualOverrideEvent(byte[] machineStatus) {
+        if (machineStatus == null || machineStatus.length < 3 || machineStatus[0] != 0x06) {
+            return null;
+        }
+
+        int inclineTenths = (machineStatus[1] & 0xFF) | ((machineStatus[2] & 0xFF) << 8);
+        if (inclineTenths > 32767) inclineTenths -= 65536;
+        int inclineHundredths = inclineTenths * 10;
+
+        return new byte[]{
+                (byte) 0xFD,
+                0x02,
+                (byte) (inclineHundredths & 0xFF),
+                (byte) ((inclineHundredths >> 8) & 0xFF),
+                0x00
+        };
+    }
+
+    private double decodeMachineStatusInclinePercent(byte[] machineStatus) {
+        if (machineStatus == null || machineStatus.length < 3 || machineStatus[0] != 0x06) {
+            return Double.NaN;
+        }
+
+        int inclineTenths = (machineStatus[1] & 0xFF) | ((machineStatus[2] & 0xFF) << 8);
+        if (inclineTenths > 32767) inclineTenths -= 65536;
+        return inclineTenths / 10.0;
     }
 
     private void sendNotification(ClientState client, int charUuid, byte[] data) {
@@ -1067,8 +1119,21 @@ public class DirconServer {
      * Called from FTMSService when a manual incline change is detected.
      */
     public void sendMachineStatusToAll(byte[] statusData) {
+        activateManualOverrideStatus("FTMS bridge");
+        reassertManualIncline(decodeMachineStatusInclinePercent(statusData), "FTMS bridge");
         for (ClientState client : clients.values()) {
+            byte[] wahooStatus = isTreadmillDirconProfile() ? buildWahooStatus() : null;
+            byte[] wahooManualOverride = isTreadmillDirconProfile()
+                    ? buildWahooManualOverrideEvent(statusData)
+                    : null;
+            logManualOverrideNotification(client, statusData, wahooStatus, wahooManualOverride, "FTMS bridge");
             sendNotification(client, CHAR_MACHINE_STATUS, statusData);
+            if (isTreadmillDirconProfile()) {
+                if (wahooManualOverride != null) {
+                    sendWahooNotification(client, CHAR_WAHOO_E03E, 0xE03E, wahooManualOverride);
+                }
+                sendWahooNotification(client, CHAR_WAHOO_E03D, 0xE03D, wahooStatus);
+            }
         }
     }
 
@@ -1110,9 +1175,21 @@ public class DirconServer {
         status[2] = (byte) ((inclRaw >> 8) & 0xFF);
 
         Log.i(LOG_TAG, "Manual incline change: " + currentIncline + "% — sending Machine Status");
-
+        activateManualOverrideStatus("DIRCON polling");
+        reassertManualIncline(currentIncline, "DIRCON polling");
         for (ClientState client : clients.values()) {
+            byte[] wahooStatus = isTreadmillDirconProfile() ? buildWahooStatus() : null;
+            byte[] wahooManualOverride = isTreadmillDirconProfile()
+                    ? buildWahooManualOverrideEvent(status)
+                    : null;
+            logManualOverrideNotification(client, status, wahooStatus, wahooManualOverride, "DIRCON polling");
             sendNotification(client, CHAR_MACHINE_STATUS, status);
+            if (isTreadmillDirconProfile()) {
+                if (wahooManualOverride != null) {
+                    sendWahooNotification(client, CHAR_WAHOO_E03E, 0xE03E, wahooManualOverride);
+                }
+                sendWahooNotification(client, CHAR_WAHOO_E03D, 0xE03D, wahooStatus);
+            }
         }
     }
 
@@ -1122,6 +1199,144 @@ public class DirconServer {
      */
     public void setFtmsTargetIncline(double incline) {
         this.ftmsTargetIncline = incline;
+    }
+
+    private void reassertManualIncline(double inclinePercent, String source) {
+        if (!isTreadmillDirconProfile() || grpc == null || Double.isNaN(inclinePercent)) {
+            return;
+        }
+
+        // Mirror the user's manual choice so any in-flight Zwift command gets overwritten.
+        ftmsTargetIncline = inclinePercent;
+        ftmsService.setFtmsTargetIncline(inclinePercent);
+        Log.i(LOG_TAG, String.format(
+                "Reasserting manual incline via %s: %.1f%% (immediate)",
+                source, inclinePercent));
+        grpc.setIncline(inclinePercent);
+        scheduleManualInclineReassert(inclinePercent, source);
+    }
+
+    private void scheduleManualInclineReassert(double inclinePercent, String source) {
+        if (notificationScheduler == null || notificationScheduler.isShutdown()) {
+            return;
+        }
+
+        try {
+            notificationScheduler.schedule(() -> {
+                if (!running || !manualOverrideStatusActive || grpc == null) {
+                    return;
+                }
+
+                double currentIncline = grpc.getLastInclinePercent();
+                if (!Double.isNaN(currentIncline)
+                        && Math.abs(currentIncline - inclinePercent) <= INCLINE_TOLERANCE) {
+                    Log.i(LOG_TAG, String.format(
+                            "Manual incline reassert skipped via %s: already at %.1f%%",
+                            source, currentIncline));
+                    return;
+                }
+
+                ftmsTargetIncline = inclinePercent;
+                ftmsService.setFtmsTargetIncline(inclinePercent);
+                Log.i(LOG_TAG, String.format(
+                        "Reasserting manual incline via %s: %.1f%% (follow-up after %dms, current=%.1f%%)",
+                        source, inclinePercent, MANUAL_OVERRIDE_REASSERT_DELAY_MS, currentIncline));
+                grpc.setIncline(inclinePercent);
+            }, MANUAL_OVERRIDE_REASSERT_DELAY_MS, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException e) {
+            Log.w(LOG_TAG, "Manual incline reassert scheduling rejected", e);
+        }
+    }
+
+    private void activateManualOverrideStatus(String source) {
+        if (!isTreadmillDirconProfile()) {
+            return;
+        }
+        manualOverrideIgnoreUntilMs = System.currentTimeMillis() + MANUAL_OVERRIDE_IGNORE_MS;
+        if (!manualOverrideStatusActive) {
+            Log.i(LOG_TAG, "Manual override status active via " + source);
+        } else {
+            Log.i(LOG_TAG, "Manual override deadband extended via " + source
+                    + " to +" + MANUAL_OVERRIDE_IGNORE_MS + "ms");
+        }
+        manualOverrideStatusActive = true;
+    }
+
+    private void clearManualOverrideStatus(String source) {
+        if (!manualOverrideStatusActive) {
+            return;
+        }
+
+        manualOverrideStatusActive = false;
+        manualOverrideIgnoreUntilMs = 0L;
+        Log.i(LOG_TAG, "Manual override status cleared by " + source);
+
+        if (!isTreadmillDirconProfile()) {
+            return;
+        }
+
+        byte[] wahooStatus = buildWahooStatus();
+        for (ClientState client : clients.values()) {
+            Log.i(LOG_TAG, "Manual override clear notify to "
+                    + describeClient(client)
+                    + ": subs[E03D=" + client.notifySubscriptions.contains(0xE03D)
+                    + "] E03D=" + bytesToHex(wahooStatus));
+            sendWahooNotification(client, CHAR_WAHOO_E03D, 0xE03D, wahooStatus);
+        }
+    }
+
+    private void clearManualOverrideStatusIfExpired(String source) {
+        if (!manualOverrideStatusActive) {
+            return;
+        }
+        if (System.currentTimeMillis() < manualOverrideIgnoreUntilMs) {
+            return;
+        }
+        clearManualOverrideStatus(source);
+    }
+
+    private boolean shouldIgnoreIncomingInclineCommand(
+            String source,
+            double requestedInclinePercent,
+            double appliedInclinePercent
+    ) {
+        if (!manualOverrideStatusActive) {
+            return false;
+        }
+
+        long now = System.currentTimeMillis();
+        long remainingMs = manualOverrideIgnoreUntilMs - now;
+        if (remainingMs <= 0) {
+            clearManualOverrideStatus(source + " after deadband");
+            return false;
+        }
+
+        Log.i(LOG_TAG, String.format(
+                "Ignoring incline command from %s during manual-override deadband: requested=%.2f%% applied=%.1f%% remaining=%dms",
+                source, requestedInclinePercent, appliedInclinePercent, remainingMs));
+        return true;
+    }
+
+    private void logManualOverrideNotification(
+            ClientState client,
+            byte[] machineStatus,
+            byte[] wahooStatus,
+            byte[] wahooManualOverride,
+            String source
+    ) {
+        Log.i(LOG_TAG, "Manual override notify (" + source + ") to "
+                + describeClient(client)
+                + ": subs[2ADA=" + client.notifySubscriptions.contains(CHAR_MACHINE_STATUS)
+                + ",E03E=" + client.notifySubscriptions.contains(0xE03E)
+                + ",E03D=" + client.notifySubscriptions.contains(0xE03D)
+                + "] 2ADA=" + bytesToHex(machineStatus)
+                + (wahooManualOverride != null ? " E03E=" + bytesToHex(wahooManualOverride) : "")
+                + (wahooStatus != null ? " E03D=" + bytesToHex(wahooStatus) : ""));
+    }
+
+    private String describeClient(ClientState client) {
+        SocketAddress remoteAddress = client.socket.getRemoteSocketAddress();
+        return remoteAddress != null ? remoteAddress.toString() : "unknown-client";
     }
 
     // --- Data Builders ---
@@ -1336,6 +1551,12 @@ public class DirconServer {
             props.put("serial-number", dirconSerialNumber);
 
             String serviceName = getDirconServiceName(macAddress);
+            SentryDiagnostics.recordDirconProfileSelection(
+                    grpc,
+                    serviceName,
+                    props.get("ble-service-uuids"),
+                    isTreadmillDirconProfile()
+            );
 
             ServiceInfo serviceInfo = ServiceInfo.create(
                     "_wahoo-fitness-tnp._tcp.local.",
