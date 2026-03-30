@@ -39,6 +39,7 @@ import javax.jmdns.ServiceInfo;
 public class DirconServer {
     private static final String LOG_TAG = "DIRCON";
     private static final String GENERIC_DIRCON_SERVICE_NAME = "NordicFTMS";
+    private static final String TREADMILL_DIRCON_SERVICE_NAME = "KICKR RUN 9999";
     private static final String GENERIC_MANUFACTURER_NAME = "NordicFTMS";
     private static final String GENERIC_HARDWARE_REV = "1";
     private static final String KICKR_RUN_HARDWARE_REV = "4";
@@ -1550,7 +1551,7 @@ public class DirconServer {
             String dirconSerialNumber = getDirconSerialNumber();
             props.put("serial-number", dirconSerialNumber);
 
-            String serviceName = getDirconServiceName(macAddress);
+            String serviceName = getDirconServiceName();
             SentryDiagnostics.recordDirconProfileSelection(
                     grpc,
                     serviceName,
@@ -1636,15 +1637,11 @@ public class DirconServer {
         }
     }
 
-    private String getDirconServiceName(String macAddress) {
+    private String getDirconServiceName() {
         if (!isTreadmillDirconProfile()) {
             return GENERIC_DIRCON_SERVICE_NAME;
         }
-        String macHex = macAddress.replace("-", "");
-        String suffix = macHex.length() >= 4
-                ? macHex.substring(macHex.length() - 4)
-                : "ABCD";
-        return "KICKR RUN " + suffix;
+        return TREADMILL_DIRCON_SERVICE_NAME;
     }
 
     private String getDirconBleServiceUuids() {
