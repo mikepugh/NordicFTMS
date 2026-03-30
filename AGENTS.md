@@ -25,12 +25,12 @@ Android app that runs on iFit-enabled NordicTrack/ProForm fitness equipment and 
 ./gradlew assembleDebug
 ```
 
-## Version Bumps
+## Versioning
 
-Update version in all three files:
-1. `app/build.gradle` — `versionCode` and `versionName`
-2. `AndroidManifest.xml` — `android:versionCode` and `android:versionName`
-3. `.github/workflows/release.yml` — tag trigger version
+App versioning is automatic:
+1. Release builds pass `-PVERSION_NAME` from the GitHub tag, for example `v0.9.5`
+2. Local builds fall back to `git describe --tags --long --dirty`
+3. `app/build.gradle` converts the resolved semver into Android `versionName` and `versionCode`
 
 ## Notes
 

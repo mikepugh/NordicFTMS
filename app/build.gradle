@@ -3,6 +3,118 @@ plugins {
     id 'com.google.protobuf'
 }
 
+def runCommand(List<String> command) {
+    try {
+        def stdout = new ByteArrayOutputStream()
+        exec {
+            workingDir rootDir
+            commandLine command
+            standardOutput = stdout
+            errorOutput = new ByteArrayOutputStream()
+            ignoreExitValue = true
+        }
+        return stdout.toString().trim()
+    } catch (Exception ignored) {
+        return ""
+    }
+}
+
+def parseVersionInfo(String rawVersion) {
+    if (!rawVersion) {
+        return null
+    }
+
+    def matcher = (rawVersion.trim().replaceFirst(/^v/, "") =~ /^(\d+)\.(\d+)\.(\d+)(?:-(\d+)-g([0-9a-f]+))?(-dirty)?$/)
+    if (!matcher.matches()) {
+        return null
+    }
+
+    return [
+            major          : matcher[0][1].toInteger(),
+            minor          : matcher[0][2].toInteger(),
+            patch          : matcher[0][3].toInteger(),
+            commitsSinceTag: matcher[0][4] ? matcher[0][4].toInteger() : 0,
+            gitSha         : matcher[0][5] ?: "",
+            dirty          : matcher[0][6] != null,
+            fallback       : false
+    ]
+}
+
+def resolveVersionInfo() {
+    def explicitVersion = (project.findProperty("VERSION_NAME") ?: System.getenv("VERSION_NAME"))?.toString()?.trim()
+    if (explicitVersion) {
+        def parsedExplicitVersion = parseVersionInfo(explicitVersion)
+        if (parsedExplicitVersion == null) {
+            throw new GradleException("VERSION_NAME '${explicitVersion}' must use MAJOR.MINOR.PATCH format")
+        }
+        return parsedExplicitVersion
+    }
+
+    def githubRefName = System.getenv("GITHUB_REF_NAME")?.trim()
+    def parsedGithubRef = parseVersionInfo(githubRefName)
+    if (parsedGithubRef != null) {
+        return parsedGithubRef
+    }
+
+    def gitDescribe = runCommand(["git", "describe", "--tags", "--long", "--dirty", "--match", "v[0-9]*"])
+    def parsedGitDescribe = parseVersionInfo(gitDescribe)
+    if (parsedGitDescribe != null) {
+        return parsedGitDescribe
+    }
+
+    return [
+            major          : 0,
+            minor          : 0,
+            patch          : 0,
+            commitsSinceTag: 0,
+            gitSha         : "",
+            dirty          : false,
+            fallback       : true
+    ]
+}
+
+def buildVersionName(Map<String, ?> versionInfo) {
+    if (versionInfo.fallback) {
+        return "0.0.0-local"
+    }
+
+    def baseVersion = "${versionInfo.major}.${versionInfo.minor}.${versionInfo.patch}"
+    if (versionInfo.commitsSinceTag == 0 && !versionInfo.dirty) {
+        return baseVersion
+    }
+
+    def suffixParts = []
+    if (versionInfo.commitsSinceTag > 0) {
+        suffixParts << "dev.${versionInfo.commitsSinceTag}"
+    }
+    if (versionInfo.gitSha) {
+        suffixParts << versionInfo.gitSha
+    }
+    if (versionInfo.dirty) {
+        suffixParts << "dirty"
+    }
+
+    return "${baseVersion}-${suffixParts.join('.')}"
+}
+
+def buildVersionCode(Map<String, ?> versionInfo) {
+    if (versionInfo.fallback) {
+        return 1
+    }
+
+    if (versionInfo.major > 99 || versionInfo.minor > 99 || versionInfo.patch > 99 || versionInfo.commitsSinceTag > 99) {
+        throw new GradleException("Version components must stay within two digits to generate a valid versionCode")
+    }
+
+    return (versionInfo.major * 1000000) + (versionInfo.minor * 10000) + (versionInfo.patch * 100) + versionInfo.commitsSinceTag
+}
+
+def resolvedVersionInfo = resolveVersionInfo()
+def resolvedVersionName = buildVersionName(resolvedVersionInfo)
+def resolvedVersionCode = buildVersionCode(resolvedVersionInfo)
+
+logger.lifecycle("NordicFTMS build version: ${resolvedVersionName} (${resolvedVersionCode})")
+
 android {
     compileSdkVersion 34
 
@@ -10,8 +122,8 @@ android {
         applicationId "com.nordicftms.app"
         minSdkVersion 21
         targetSdkVersion 34
-        versionCode 1
-        versionName "1.0.0"
+        versionCode resolvedVersionCode
+        versionName resolvedVersionName
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         manifestPlaceholders = [

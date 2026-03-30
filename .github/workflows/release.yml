@@ -35,7 +35,9 @@ jobs:
       - name: Build APK
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-        run: chmod +x gradlew && ./gradlew assembleDebug
+        run: |
+          chmod +x gradlew
+          ./gradlew -PVERSION_NAME="${{ steps.version.outputs.VERSION }}" assembleDebug
 
       - name: Download ADB platform-tools
         run: |
