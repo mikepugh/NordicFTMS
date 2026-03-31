@@ -15,7 +15,13 @@ public final class SentryDiagnostics {
     private SentryDiagnostics() {
     }
 
-    public static void recordConsoleInfo(ConsoleInfo consoleInfo, ConsoleType machineType) {
+    public static void recordConsoleInfo(
+            ConsoleInfo consoleInfo,
+            ConsoleType machineType,
+            String source,
+            boolean usable,
+            int attempt
+    ) {
         if (consoleInfo == null) {
             return;
         }
@@ -26,13 +32,18 @@ public final class SentryDiagnostics {
         Sentry.setTag("machine_type", machineTypeName);
         Sentry.setTag("console_can_set_incline", Boolean.toString(consoleInfo.getCanSetIncline()));
         Sentry.setTag("console_can_set_speed", Boolean.toString(consoleInfo.getCanSetSpeed()));
+        Sentry.setTag("console_info_source", emptyToUnknown(source));
+        Sentry.setTag("console_info_usable", Boolean.toString(usable));
 
         if (!consoleInfo.getName().isEmpty()) {
             Sentry.setTag("console_name", consoleInfo.getName());
         }
 
         Sentry.logger().info(
-                "Console info fetched: machineType=%s name=%s minKph=%.2f maxKph=%.2f minIncline=%.2f maxIncline=%.2f canSetSpeed=%s canSetIncline=%s canSetResistance=%s firmware=%s",
+                "Console info fetched: source=%s attempt=%s usable=%s machineType=%s name=%s minKph=%.2f maxKph=%.2f minIncline=%.2f maxIncline=%.2f canSetSpeed=%s canSetIncline=%s canSetResistance=%s firmware=%s",
+                emptyToUnknown(source),
+                attempt > 0 ? Integer.toString(attempt) : "stream",
+                usable,
                 machineTypeName,
                 emptyToUnknown(consoleInfo.getName()),
                 consoleInfo.getMinKph(),
@@ -44,6 +55,16 @@ public final class SentryDiagnostics {
                 consoleInfo.getCanSetResistance(),
                 emptyToUnknown(consoleInfo.getFirmwareVersion())
         );
+
+        if (!usable) {
+            Sentry.logger().warn(
+                    "Console info payload looked empty: source=%s attempt=%s machineType=%s name=%s",
+                    emptyToUnknown(source),
+                    attempt > 0 ? Integer.toString(attempt) : "stream",
+                    machineTypeName,
+                    emptyToUnknown(consoleInfo.getName())
+            );
+        }
 
         if (speedAndInclineCapable && !isTreadmillMachineType(machineType)) {
             Sentry.logger().warn(
@@ -58,8 +79,11 @@ public final class SentryDiagnostics {
         }
     }
 
-    public static void recordConsoleInfoFailure(Throwable error) {
-        Sentry.logger().error("Failed to fetch console info from GlassOS");
+    public static void recordConsoleInfoFailure(String source, Throwable error) {
+        Sentry.logger().error(
+                "Failed to fetch console info from GlassOS via %s",
+                emptyToUnknown(source)
+        );
 
         if (error != null) {
             Sentry.captureException(error);

@@ -36,6 +36,9 @@ public class GrpcControlService {
     private static final String HOST = "localhost";
     private static final int PORT = 54321;
     private static final String CLIENT_ID = "com.ifit.dev_app";
+    private static final int CONSOLE_INFO_FETCH_ATTEMPTS = 5;
+    private static final long CONSOLE_INFO_FETCH_RETRY_MS = 1500L;
+    private static final long CONSOLE_INFO_STREAM_RETRY_MS = 3000L;
 
     private static final Metadata.Key<String> CLIENT_ID_KEY =
             Metadata.Key.of("client_id", Metadata.ASCII_STRING_MARSHALLER);
@@ -69,9 +72,13 @@ public class GrpcControlService {
     private volatile double lastWatts = 0;
 
     // Console info (populated once on connect)
+    private final Object consoleInfoLock = new Object();
     private volatile ConsoleInfo consoleInfo;
     private volatile ConsoleType machineType = ConsoleType.CONSOLE_TYPE_UNKNOWN;
     private volatile boolean connected = false;
+    private volatile boolean advancedSubscriptionsStarted = false;
+    private volatile Throwable lastConsoleInfoFetchError;
+    private volatile String lastConsoleInfoFetchErrorSource = "unknown";
 
     public GrpcControlService(Context context) {
         this.appContext = context.getApplicationContext();
@@ -113,8 +120,11 @@ public class GrpcControlService {
             connected = true;
             Log.i(LOG_TAG, "gRPC channel connected to " + HOST + ":" + PORT + " with mTLS");
 
-            // Fetch console info to learn machine type and capabilities
-            fetchConsoleInfo();
+            // Fetch console info to learn machine type and capabilities. Some
+            // GlassOS builds return an all-default ConsoleInfo immediately
+            // after startup, so keep listening for later updates too.
+            subscribeConsoleInfo();
+            resolveInitialConsoleInfo();
 
         } catch (Exception e) {
             Log.e(LOG_TAG, "Failed to connect gRPC channel", e);
@@ -203,29 +213,191 @@ public class GrpcControlService {
 
     // --- Console Info ---
 
-    private void fetchConsoleInfo() {
-        try {
-            consoleInfo = consoleStub
-                    .withDeadlineAfter(5, TimeUnit.SECONDS)
-                    .getConsole(Empty.getDefaultInstance());
+    private void resolveInitialConsoleInfo() {
+        lastConsoleInfoFetchError = null;
+        lastConsoleInfoFetchErrorSource = "unknown";
 
-            machineType = consoleInfo.getMachineType();
+        for (int attempt = 1; attempt <= CONSOLE_INFO_FETCH_ATTEMPTS; attempt++) {
+            if (fetchConsoleInfoFromRpc(false, attempt)) {
+                return;
+            }
+            if (fetchConsoleInfoFromRpc(true, attempt)) {
+                return;
+            }
 
-            Log.i(LOG_TAG, "Console info received:");
-            Log.i(LOG_TAG, "  Machine type: " + machineType);
-            Log.i(LOG_TAG, "  Name: " + consoleInfo.getName());
-            Log.i(LOG_TAG, "  Speed range: " + consoleInfo.getMinKph() + " - " + consoleInfo.getMaxKph() + " kph");
-            Log.i(LOG_TAG, "  Incline range: " + consoleInfo.getMinInclinePercent() + " - " + consoleInfo.getMaxInclinePercent() + "%");
-            Log.i(LOG_TAG, "  Can set speed: " + consoleInfo.getCanSetSpeed());
-            Log.i(LOG_TAG, "  Can set incline: " + consoleInfo.getCanSetIncline());
-            Log.i(LOG_TAG, "  Can set resistance: " + consoleInfo.getCanSetResistance());
-            Log.i(LOG_TAG, "  Firmware: " + consoleInfo.getFirmwareVersion());
-            Log.i(LOG_TAG, "  Serial: " + consoleInfo.getProductSerialNumber());
-            SentryDiagnostics.recordConsoleInfo(consoleInfo, machineType);
-        } catch (Exception e) {
-            Log.e(LOG_TAG, "Failed to fetch console info", e);
-            SentryDiagnostics.recordConsoleInfoFailure(e);
+            if (hasUsableConsoleInfo()) {
+                return;
+            }
+
+            if (attempt < CONSOLE_INFO_FETCH_ATTEMPTS) {
+                Log.w(LOG_TAG, "Console info still empty after attempt " + attempt
+                        + ", retrying in " + CONSOLE_INFO_FETCH_RETRY_MS + " ms");
+                try {
+                    Thread.sleep(CONSOLE_INFO_FETCH_RETRY_MS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    lastConsoleInfoFetchError = e;
+                    lastConsoleInfoFetchErrorSource = "initial_console_info_resolution";
+                    break;
+                }
+            }
         }
+
+        if (!hasUsableConsoleInfo()) {
+            Log.w(LOG_TAG, "Console info remained empty after initial retries; waiting for ConsoleChanged updates");
+            if (lastConsoleInfoFetchError != null) {
+                SentryDiagnostics.recordConsoleInfoFailure(
+                        lastConsoleInfoFetchErrorSource,
+                        lastConsoleInfoFetchError
+                );
+            }
+        }
+    }
+
+    private boolean fetchConsoleInfoFromRpc(boolean useKnownConsoleInfo, int attempt) {
+        String source = useKnownConsoleInfo ? "GetKnownConsoleInfo" : "GetConsole";
+
+        try {
+            ConsoleInfo fetchedConsoleInfo = useKnownConsoleInfo
+                    ? consoleStub.withDeadlineAfter(5, TimeUnit.SECONDS)
+                            .getKnownConsoleInfo(Empty.getDefaultInstance())
+                    : consoleStub.withDeadlineAfter(5, TimeUnit.SECONDS)
+                            .getConsole(Empty.getDefaultInstance());
+
+            return applyConsoleInfo(source, fetchedConsoleInfo, attempt);
+        } catch (Exception e) {
+            Log.e(LOG_TAG, "Failed to fetch console info via " + source
+                    + " (attempt " + attempt + ")", e);
+            lastConsoleInfoFetchError = e;
+            lastConsoleInfoFetchErrorSource = source;
+            return false;
+        }
+    }
+
+    private void subscribeConsoleInfo() {
+        consoleAsyncStub.consoleChanged(Empty.getDefaultInstance(), new StreamObserver<ConsoleInfo>() {
+            @Override
+            public void onNext(ConsoleInfo updatedConsoleInfo) {
+                applyConsoleInfo("ConsoleChanged", updatedConsoleInfo, 0);
+            }
+
+            @Override
+            public void onError(Throwable t) {
+                Log.e(LOG_TAG, "Console info subscription error", t);
+                retrySubscription(GrpcControlService.this::subscribeConsoleInfo, CONSOLE_INFO_STREAM_RETRY_MS);
+            }
+
+            @Override
+            public void onCompleted() {
+                Log.i(LOG_TAG, "Console info subscription completed");
+            }
+        });
+    }
+
+    private boolean applyConsoleInfo(String source, ConsoleInfo updatedConsoleInfo, int attempt) {
+        if (updatedConsoleInfo == null) {
+            return false;
+        }
+
+        boolean infoApplied = false;
+        boolean infoUsable = isConsoleInfoUsable(updatedConsoleInfo);
+        boolean updatedMachineType = false;
+
+        synchronized (consoleInfoLock) {
+            ConsoleInfo previousConsoleInfo = consoleInfo;
+            boolean previousInfoUsable = isConsoleInfoUsable(previousConsoleInfo);
+
+            if (previousConsoleInfo != null && previousConsoleInfo.equals(updatedConsoleInfo)) {
+                return infoUsable;
+            }
+
+            if (!infoUsable && previousInfoUsable) {
+                Log.w(LOG_TAG, "Ignoring empty console info from " + source
+                        + " because populated console info is already cached");
+                return false;
+            }
+
+            ConsoleType previousMachineType = machineType;
+            consoleInfo = updatedConsoleInfo;
+            machineType = updatedConsoleInfo.getMachineType();
+            updatedMachineType = previousMachineType != machineType;
+            infoApplied = true;
+        }
+
+        if (infoApplied) {
+            if (infoUsable) {
+                lastConsoleInfoFetchError = null;
+                lastConsoleInfoFetchErrorSource = "unknown";
+            }
+            logConsoleInfo(source, updatedConsoleInfo, attempt, infoUsable);
+            SentryDiagnostics.recordConsoleInfo(
+                    updatedConsoleInfo,
+                    updatedConsoleInfo.getMachineType(),
+                    source,
+                    infoUsable,
+                    attempt
+            );
+
+            if (updatedMachineType) {
+                startEquipmentSpecificSubscriptionsIfNeeded();
+            }
+        }
+
+        return infoUsable;
+    }
+
+    private void logConsoleInfo(String source, ConsoleInfo updatedConsoleInfo, int attempt, boolean infoUsable) {
+        String attemptSuffix = attempt > 0 ? " (attempt " + attempt + ")" : "";
+
+        Log.i(LOG_TAG, "Console info received via " + source + attemptSuffix
+                + " usable=" + infoUsable);
+        Log.i(LOG_TAG, "  Machine type: " + updatedConsoleInfo.getMachineType());
+        Log.i(LOG_TAG, "  Name: " + updatedConsoleInfo.getName());
+        Log.i(LOG_TAG, "  Speed range: " + updatedConsoleInfo.getMinKph()
+                + " - " + updatedConsoleInfo.getMaxKph() + " kph");
+        Log.i(LOG_TAG, "  Incline range: " + updatedConsoleInfo.getMinInclinePercent()
+                + " - " + updatedConsoleInfo.getMaxInclinePercent() + "%");
+        Log.i(LOG_TAG, "  Can set speed: " + updatedConsoleInfo.getCanSetSpeed());
+        Log.i(LOG_TAG, "  Can set incline: " + updatedConsoleInfo.getCanSetIncline());
+        Log.i(LOG_TAG, "  Can set resistance: " + updatedConsoleInfo.getCanSetResistance());
+        Log.i(LOG_TAG, "  Firmware: " + updatedConsoleInfo.getFirmwareVersion());
+        Log.i(LOG_TAG, "  Serial: " + updatedConsoleInfo.getProductSerialNumber());
+    }
+
+    private boolean hasUsableConsoleInfo() {
+        return isConsoleInfoUsable(consoleInfo);
+    }
+
+    private boolean isConsoleInfoUsable(ConsoleInfo info) {
+        if (info == null) {
+            return false;
+        }
+
+        return info.getMachineType() != ConsoleType.CONSOLE_TYPE_UNKNOWN
+                || !info.getName().isEmpty()
+                || info.getCanSetSpeed()
+                || info.getCanSetIncline()
+                || info.getCanSetResistance()
+                || info.getMaxKph() > 0.0
+                || info.getMaxInclinePercent() > 0.0
+                || info.getMaxResistance() > 0.0
+                || !info.getFirmwareVersion().isEmpty()
+                || !info.getProductSerialNumber().isEmpty();
+    }
+
+    private boolean isTreadmillLikeConsole(ConsoleInfo info) {
+        if (info == null) {
+            return false;
+        }
+
+        boolean hasSpeedControl = info.getCanSetSpeed() || info.getMaxKph() > 0.0;
+        boolean hasInclineControl = info.getCanSetIncline() || info.getMaxInclinePercent() > 0.0;
+        boolean hasBikeOrEllipticalControls = info.getCanSetResistance()
+                || info.getMaxResistance() > 0.0
+                || info.getCanSetGear()
+                || info.getMaxGear() > 0;
+
+        return hasSpeedControl && hasInclineControl && !hasBikeOrEllipticalControls;
     }
 
     public ConsoleInfo getConsoleInfo() {
@@ -243,7 +415,9 @@ public class GrpcControlService {
 
     public boolean isTreadmillDevice() {
         return machineType == ConsoleType.TREADMILL
-                || machineType == ConsoleType.INCLINE_TRAINER;
+                || machineType == ConsoleType.INCLINE_TRAINER
+                || (machineType == ConsoleType.CONSOLE_TYPE_UNKNOWN
+                && isTreadmillLikeConsole(consoleInfo));
     }
 
     public boolean isRower() {
@@ -319,8 +493,17 @@ public class GrpcControlService {
         subscribeSpeed();
         subscribeIncline();
         subscribeDistance();
+        startEquipmentSpecificSubscriptionsIfNeeded();
+    }
+
+    private synchronized void startEquipmentSpecificSubscriptionsIfNeeded() {
+        if (!connected || advancedSubscriptionsStarted) {
+            return;
+        }
 
         if (isBikeDevice() || isElliptical()) {
+            advancedSubscriptionsStarted = true;
+            Log.i(LOG_TAG, "Starting resistance/cadence/watts subscriptions for " + machineType);
             subscribeResistance();
             subscribeCadence();
             subscribeWatts();

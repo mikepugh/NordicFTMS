@@ -39,7 +39,6 @@ import javax.jmdns.ServiceInfo;
 public class DirconServer {
     private static final String LOG_TAG = "DIRCON";
     private static final String GENERIC_DIRCON_SERVICE_NAME = "NordicFTMS";
-    private static final String TREADMILL_DIRCON_SERVICE_NAME = "KICKR RUN 9999";
     private static final String GENERIC_MANUFACTURER_NAME = "NordicFTMS";
     private static final String GENERIC_HARDWARE_REV = "1";
     private static final String KICKR_RUN_HARDWARE_REV = "4";
@@ -183,6 +182,8 @@ public class DirconServer {
     private ScheduledExecutorService notificationScheduler;
     private JmDNS jmdns;
     private WifiManager.MulticastLock multicastLock;
+    private final Object mdnsLock = new Object();
+    private volatile Boolean advertisedTreadmillProfile;
 
     // Wahoo simulation state (from setSimMode)
     private double simWeight = 75.0;
@@ -983,6 +984,7 @@ public class DirconServer {
     // --- Notification Broadcasting ---
 
     private void broadcastNotifications() {
+        maybeRefreshMdnsProfile();
         if (clients.isEmpty() || grpc == null) return;
 
         try {
@@ -1521,6 +1523,11 @@ public class DirconServer {
             WifiManager wifiManager = (WifiManager) context.getApplicationContext()
                     .getSystemService(Context.WIFI_SERVICE);
 
+            if (wifiManager == null) {
+                Log.e(LOG_TAG, "WiFi manager unavailable; cannot start mDNS");
+                return;
+            }
+
             // Acquire multicast lock for mDNS
             multicastLock = wifiManager.createMulticastLock("NordicFTMS-DIRCON");
             multicastLock.setReferenceCounted(false);
@@ -1538,49 +1545,102 @@ public class DirconServer {
 
             Log.i(LOG_TAG, "Starting mDNS on " + address.getHostAddress());
 
-            jmdns = JmDNS.create(address, "NordicFTMS");
-
-            // Build TXT record properties. Treadmills expose the KICKR RUN-style
-            // Wahoo services; other machines publish a generic FTMS-only profile.
-            Map<String, String> props = new HashMap<>();
-            props.put("ble-service-uuids", getDirconBleServiceUuids());
-
-            // Use WiFi MAC or a stable identifier
-            String macAddress = getMacAddress(wifiManager);
-            props.put("mac-address", macAddress);
-            String dirconSerialNumber = getDirconSerialNumber();
-            props.put("serial-number", dirconSerialNumber);
-
-            String serviceName = getDirconServiceName();
-            SentryDiagnostics.recordDirconProfileSelection(
-                    grpc,
-                    serviceName,
-                    props.get("ble-service-uuids"),
-                    isTreadmillDirconProfile()
-            );
-
-            ServiceInfo serviceInfo = ServiceInfo.create(
-                    "_wahoo-fitness-tnp._tcp.local.",
-                    serviceName,
-                    DIRCON_PORT,
-                    0, 0, props
-            );
-
-            jmdns.registerService(serviceInfo);
-            Log.i(LOG_TAG, "mDNS registered as \"" + serviceName + "\" on port " + DIRCON_PORT
-                    + " serial=" + dirconSerialNumber);
+            synchronized (mdnsLock) {
+                jmdns = JmDNS.create(address, "NordicFTMS");
+                registerMdnsService(wifiManager);
+            }
 
         } catch (Exception e) {
             Log.e(LOG_TAG, "Failed to start mDNS", e);
         }
     }
 
+    private void maybeRefreshMdnsProfile() {
+        if (jmdns == null) {
+            return;
+        }
+
+        Boolean lastAdvertisedProfile = advertisedTreadmillProfile;
+        boolean treadmillProfile = isTreadmillDirconProfile();
+        if (lastAdvertisedProfile != null && lastAdvertisedProfile == treadmillProfile) {
+            return;
+        }
+
+        WifiManager wifiManager = (WifiManager) context.getApplicationContext()
+                .getSystemService(Context.WIFI_SERVICE);
+        if (wifiManager == null) {
+            return;
+        }
+
+        synchronized (mdnsLock) {
+            if (jmdns == null) {
+                return;
+            }
+
+            lastAdvertisedProfile = advertisedTreadmillProfile;
+            if (lastAdvertisedProfile != null && lastAdvertisedProfile == treadmillProfile) {
+                return;
+            }
+
+            try {
+                Log.i(LOG_TAG, "DIRCON profile changed after startup, refreshing mDNS advertisement");
+                registerMdnsService(wifiManager);
+            } catch (Exception e) {
+                Log.e(LOG_TAG, "Failed to refresh mDNS advertisement", e);
+            }
+        }
+    }
+
+    private void registerMdnsService(WifiManager wifiManager) throws IOException {
+        if (jmdns == null) {
+            return;
+        }
+
+        boolean treadmillProfile = isTreadmillDirconProfile();
+
+        // Build TXT record properties. Treadmills expose the KICKR RUN-style
+        // Wahoo services; other machines publish a generic FTMS-only profile.
+        Map<String, String> props = new HashMap<>();
+        props.put("ble-service-uuids", getDirconBleServiceUuids());
+
+        // Use WiFi MAC or a stable identifier
+        String macAddress = getMacAddress(wifiManager);
+        props.put("mac-address", macAddress);
+        String dirconSerialNumber = getDirconSerialNumber();
+        props.put("serial-number", dirconSerialNumber);
+
+        String serviceName = getDirconServiceName(macAddress);
+
+        jmdns.unregisterAllServices();
+        ServiceInfo serviceInfo = ServiceInfo.create(
+                "_wahoo-fitness-tnp._tcp.local.",
+                serviceName,
+                DIRCON_PORT,
+                0, 0, props
+        );
+        jmdns.registerService(serviceInfo);
+        advertisedTreadmillProfile = treadmillProfile;
+
+        SentryDiagnostics.recordDirconProfileSelection(
+                grpc,
+                serviceName,
+                props.get("ble-service-uuids"),
+                treadmillProfile
+        );
+
+        Log.i(LOG_TAG, "mDNS registered as \"" + serviceName + "\" on port " + DIRCON_PORT
+                + " serial=" + dirconSerialNumber);
+    }
+
     private void stopMdns() {
         try {
-            if (jmdns != null) {
-                jmdns.unregisterAllServices();
-                jmdns.close();
-                jmdns = null;
+            synchronized (mdnsLock) {
+                if (jmdns != null) {
+                    jmdns.unregisterAllServices();
+                    jmdns.close();
+                    jmdns = null;
+                    advertisedTreadmillProfile = null;
+                }
             }
             if (multicastLock != null && multicastLock.isHeld()) {
                 multicastLock.release();
@@ -1637,11 +1697,15 @@ public class DirconServer {
         }
     }
 
-    private String getDirconServiceName() {
+    private String getDirconServiceName(String macAddress) {
         if (!isTreadmillDirconProfile()) {
             return GENERIC_DIRCON_SERVICE_NAME;
         }
-        return TREADMILL_DIRCON_SERVICE_NAME;
+        String macHex = macAddress.replace("-", "");
+        String suffix = macHex.length() >= 4
+                ? macHex.substring(macHex.length() - 4)
+                : "ABCD";
+        return "KICKR RUN " + suffix;
     }
 
     private String getDirconBleServiceUuids() {
