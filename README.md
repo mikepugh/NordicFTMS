@@ -22,7 +22,7 @@ NordicFTMS communicates with the machine hardware through the GlassOS gRPC inter
 - **Standard BLE FTMS protocol** — works with any FTMS-compatible app
 - **DIRCON treadmill support** — supported treadmills can be discovered over Wi-Fi by apps that support Wahoo Direct Connect
 - **Bidirectional control** — read metrics AND control incline/resistance from your phone
-- **Runs silently in background** — no user interaction needed after initial install
+- **Runs silently in background** — no user interaction needed after initial installls
 - **Direct hardware communication** — uses gRPC to talk directly to GlassOS
 
 ## Zwift and DIRCON

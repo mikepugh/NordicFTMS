@@ -3,6 +3,7 @@ package com.nordicftms.app;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
@@ -22,20 +23,22 @@ import android.content.Intent;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.ParcelUuid;
+import android.os.SystemClock;
 import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
-
-import com.ifit.glassos.ConsoleInfo;
-import com.ifit.glassos.ConsoleType;
 
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
-public class FTMSService extends Service {
+public class FTMSService extends Service implements GrpcControlService.BackendUnavailableListener {
     private static final String LOG_TAG = "FTMS";
     private static final String ADVERTISED_DEVICE_NAME = "NordicFTMS";
 
@@ -57,11 +60,6 @@ public class FTMSService extends Service {
     private static final byte OP_SET_TARGET_SPEED = 0x02;
     private static final byte OP_SET_TARGET_INCLINATION = 0x03;
     private static final byte OP_SET_TARGET_RESISTANCE = 0x04;
-    private static final byte OP_SET_TARGET_POWER = 0x05;
-    private static final byte OP_SET_TARGET_HEART_RATE = 0x06;
-    private static final byte OP_START_OR_RESUME = 0x07;
-    private static final byte OP_STOP_OR_PAUSE = 0x08;
-    private static final byte OP_SET_INDOOR_BIKE_SIMULATION = 0x11;
     private static final byte OP_RESPONSE_CODE = (byte) 0x80;
 
     // Result codes
@@ -71,26 +69,38 @@ public class FTMSService extends Service {
 
     private static final String NOTIFICATION_CHANNEL_ID = "ftms_service_channel";
     private static final int NOTIFICATION_ID = 1338;
+    private static final long BACKEND_REPORT_THROTTLE_MS = 60_000L;
+
+    private static final double INCLINE_TOLERANCE = 0.3;
+    private static final long COMMAND_INTENT_RETENTION_MS = 5000L;
+    private static final int MAX_PENDING_INCLINE_TARGETS = 12;
+
+    private final InclineCommandTracker inclineCommandTracker = new InclineCommandTracker(
+            INCLINE_TOLERANCE,
+            COMMAND_INTENT_RETENTION_MS,
+            MAX_PENDING_INCLINE_TARGETS
+    );
+    private final Set<BluetoothDevice> subscribedDevices = new HashSet<>();
+    private final Object startupLock = new Object();
 
     private BluetoothManager bluetoothManager;
     private BluetoothGattServer gattServer;
     private BluetoothLeAdvertiser advertiser;
     private Handler handler;
+    private NotificationManager notificationManager;
     private Runnable notificationRunnable;
+    private ScheduledExecutorService startupExecutor;
     private boolean controlGranted = false;
+    private boolean runtimeStarted = false;
+    private boolean startupTaskScheduled = false;
+    private boolean destroyed = false;
+    private long lastBackendReportAtMs = 0L;
+    private long lastPermissionReportAtMs = 0L;
+    private int grpcRetryCount = 0;
+    private ServiceStartupState startupState = ServiceStartupState.WAITING_FOR_PERMISSION;
 
-    // Incline change tracking for Machine Status notifications
-    private double lastNotifiedIncline = Double.NaN;
-    private double ftmsTargetIncline = Double.NaN;
-    private static final double INCLINE_TOLERANCE = 0.3; // percent
-
-    // gRPC client for hardware communication
     private GrpcControlService grpc;
-
-    // DIRCON server for WiFi/TCP connectivity
     private DirconServer dirconServer;
-
-    private final Set<BluetoothDevice> subscribedDevices = new HashSet<>();
 
     private BluetoothGattCharacteristic treadmillDataCharacteristic;
     private BluetoothGattCharacteristic indoorBikeDataCharacteristic;
@@ -102,38 +112,44 @@ public class FTMSService extends Service {
         super.onCreate();
         Log.i(LOG_TAG, "FTMSService onCreate");
 
-        handler = new Handler();
+        handler = new Handler(Looper.getMainLooper());
+        notificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        startupExecutor = Executors.newSingleThreadScheduledExecutor();
         bluetoothManager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
+        grpc = new GrpcControlService(this, this);
+
+        startupState = BluetoothPermissionGate.hasRequiredPermissions(this)
+                ? ServiceStartupState.WAITING_FOR_GRPC
+                : ServiceStartupState.WAITING_FOR_PERMISSION;
 
         startForegroundNotification();
 
-        // Connect to GlassOS gRPC server on a background thread, then set up BLE
-        new Thread(() -> {
-            grpc = new GrpcControlService(FTMSService.this);
-            grpc.connect();
-
-            if (grpc.isConnected()) {
-                grpc.startSubscriptions();
-                Log.i(LOG_TAG, "gRPC connected, machine type: " + grpc.getMachineType());
-            } else {
-                Log.w(LOG_TAG, "gRPC connection failed — BLE will advertise but data/control may not work");
-            }
-
-            // Start DIRCON server (WiFi/TCP)
-            dirconServer = new DirconServer(FTMSService.this, grpc, FTMSService.this);
-            dirconServer.start();
-
-            // Set up BLE on the main thread after gRPC connects
-            handler.post(() -> {
-                setupGattServer();
-                startAdvertising();
-                startNotificationLoop();
-            });
-        }).start();
+        if (BluetoothPermissionGate.hasRequiredPermissions(this)) {
+            scheduleGrpcStartup(0L);
+        } else {
+            Log.w(LOG_TAG, "FTMSService created without Bluetooth runtime permissions");
+            recordMissingPermissionsIfNeeded("service_on_create", false, false);
+        }
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (!BluetoothPermissionGate.hasRequiredPermissions(this)) {
+            transitionToState(ServiceStartupState.WAITING_FOR_PERMISSION);
+            recordMissingPermissionsIfNeeded("service_on_start", isBleExposed(), isDirconExposed());
+            return START_NOT_STICKY;
+        }
+
+        if (startupState == ServiceStartupState.WAITING_FOR_PERMISSION) {
+            transitionToState(ServiceStartupState.WAITING_FOR_GRPC);
+        }
+
+        if (!runtimeStarted) {
+            scheduleGrpcStartup(0L);
+        } else {
+            updateForegroundNotification();
+        }
+
         return START_STICKY;
     }
 
@@ -145,52 +161,328 @@ public class FTMSService extends Service {
     @Override
     public void onDestroy() {
         Log.i(LOG_TAG, "FTMSService onDestroy");
-        stopNotificationLoop();
-        stopAdvertising();
-        closeGattServer();
-        if (dirconServer != null) {
-            dirconServer.stop();
+        destroyed = true;
+
+        if (startupExecutor != null) {
+            startupExecutor.shutdownNow();
         }
+
+        stopRuntimeComponents();
         if (grpc != null) {
             grpc.disconnect();
         }
+
         super.onDestroy();
+    }
+
+    @Override
+    public void onGrpcBackendUnavailable(String source, Throwable error) {
+        boolean bleExposed = isBleExposed();
+        boolean dirconExposed = isDirconExposed();
+
+        Log.w(LOG_TAG, "GlassOS backend became unavailable via " + source);
+        recordGrpcUnavailableIfNeeded(
+                startupState == ServiceStartupState.RUNNING ? "running_disconnect" : "waiting_for_grpc",
+                source,
+                error,
+                0,
+                bleExposed,
+                dirconExposed
+        );
+
+        stopRuntimeComponents();
+        transitionToState(ServiceStartupState.WAITING_FOR_GRPC);
+        scheduleGrpcRetry();
+    }
+
+    static long getGrpcRetryDelayMs(int retryCount) {
+        if (retryCount <= 0) {
+            return 1000L;
+        }
+        if (retryCount == 1) {
+            return 2000L;
+        }
+        if (retryCount == 2) {
+            return 5000L;
+        }
+        return 10_000L;
     }
 
     // --- Foreground Notification ---
 
     private void startForegroundNotification() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && notificationManager != null) {
             NotificationChannel channel = new NotificationChannel(
                     NOTIFICATION_CHANNEL_ID,
                     "FTMS BLE Service",
                     NotificationManager.IMPORTANCE_LOW
             );
             channel.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);
-            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-            nm.createNotificationChannel(channel);
+            notificationManager.createNotificationChannel(channel);
         }
 
-        Notification notification = new NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+        startForeground(NOTIFICATION_ID, buildForegroundNotification());
+    }
+
+    private void updateForegroundNotification() {
+        if (notificationManager != null) {
+            notificationManager.notify(NOTIFICATION_ID, buildForegroundNotification());
+        }
+    }
+
+    private Notification buildForegroundNotification() {
+        Intent launchIntent = new Intent(this, MainActivity.class);
+        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent contentIntent = PendingIntent.getActivity(
+                this,
+                0,
+                launchIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+
+        return new NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_launcher_background)
-                .setContentTitle("FTMS BLE Server")
-                .setContentText("Advertising...")
+                .setContentTitle("NordicFTMS")
+                .setContentText(getNotificationText())
+                .setContentIntent(contentIntent)
                 .setOngoing(true)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .build();
+    }
 
-        startForeground(NOTIFICATION_ID, notification);
+    private String getNotificationText() {
+        switch (startupState) {
+            case WAITING_FOR_PERMISSION:
+                return "Open NordicFTMS to grant Bluetooth access.";
+            case WAITING_FOR_GRPC:
+                return "Waiting for the treadmill backend to become ready.";
+            case RUNNING:
+            default:
+                return "Advertising over Bluetooth and DIRCON.";
+        }
+    }
+
+    // --- Startup / Recovery ---
+
+    private void scheduleGrpcStartup(long delayMs) {
+        synchronized (startupLock) {
+            if (destroyed || startupExecutor == null || startupTaskScheduled) {
+                return;
+            }
+
+            if (!BluetoothPermissionGate.hasRequiredPermissions(this)) {
+                grpcRetryCount = 0;
+                transitionToState(ServiceStartupState.WAITING_FOR_PERMISSION);
+                return;
+            }
+
+            startupTaskScheduled = true;
+            transitionToState(ServiceStartupState.WAITING_FOR_GRPC);
+            startupExecutor.schedule(() -> {
+                synchronized (startupLock) {
+                    startupTaskScheduled = false;
+                }
+                attemptGrpcStartup();
+            }, delayMs, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    private void scheduleGrpcRetry() {
+        synchronized (startupLock) {
+            if (destroyed || startupExecutor == null || startupTaskScheduled) {
+                return;
+            }
+
+            if (!BluetoothPermissionGate.hasRequiredPermissions(this)) {
+                grpcRetryCount = 0;
+                transitionToState(ServiceStartupState.WAITING_FOR_PERMISSION);
+                return;
+            }
+
+            long delayMs = getGrpcRetryDelayMs(grpcRetryCount);
+            grpcRetryCount++;
+            startupTaskScheduled = true;
+            transitionToState(ServiceStartupState.WAITING_FOR_GRPC);
+            startupExecutor.schedule(() -> {
+                synchronized (startupLock) {
+                    startupTaskScheduled = false;
+                }
+                attemptGrpcStartup();
+            }, delayMs, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    private void attemptGrpcStartup() {
+        if (destroyed) {
+            return;
+        }
+
+        if (!BluetoothPermissionGate.hasRequiredPermissions(this)) {
+            handleMissingPermissions("grpc_startup_attempt");
+            return;
+        }
+
+        transitionToState(ServiceStartupState.WAITING_FOR_GRPC);
+
+        int attemptNumber;
+        synchronized (startupLock) {
+            attemptNumber = grpcRetryCount + 1;
+        }
+
+        if (!grpc.connect()) {
+            recordGrpcUnavailableIfNeeded(
+                    "initial_connect",
+                    grpc.getLastConnectionErrorSource(),
+                    grpc.getLastConnectionError(),
+                    attemptNumber,
+                    false,
+                    false
+            );
+            scheduleGrpcRetry();
+            return;
+        }
+
+        synchronized (startupLock) {
+            grpcRetryCount = 0;
+        }
+
+        grpc.startSubscriptions();
+        handler.post(this::startRuntimeComponents);
+    }
+
+    private void startRuntimeComponents() {
+        if (destroyed || grpc == null || !grpc.isConnected()) {
+            return;
+        }
+
+        if (!BluetoothPermissionGate.hasRequiredPermissions(this)) {
+            handleMissingPermissions("runtime_start");
+            return;
+        }
+
+        if (runtimeStarted) {
+            transitionToState(ServiceStartupState.RUNNING);
+            return;
+        }
+
+        dirconServer = new DirconServer(this, grpc, this);
+        dirconServer.start();
+
+        setupGattServer();
+        startAdvertising();
+        startNotificationLoop();
+
+        runtimeStarted = true;
+        transitionToState(ServiceStartupState.RUNNING);
+        Log.i(LOG_TAG, "FTMS runtime is ready");
+    }
+
+    private void stopRuntimeComponents() {
+        runtimeStarted = false;
+        controlGranted = false;
+        subscribedDevices.clear();
+
+        stopNotificationLoop();
+        stopAdvertising();
+        closeGattServer();
+
+        if (dirconServer != null) {
+            dirconServer.stop();
+            dirconServer = null;
+        }
+    }
+
+    private void handleMissingPermissions(String source) {
+        boolean bleExposed = isBleExposed();
+        boolean dirconExposed = isDirconExposed();
+
+        Log.w(LOG_TAG, "Bluetooth permissions missing during " + source + ": "
+                + BluetoothPermissionGate.describeMissingPermissions(this));
+
+        recordMissingPermissionsIfNeeded(source, bleExposed, dirconExposed);
+        stopRuntimeComponents();
+        if (grpc != null) {
+            grpc.disconnect();
+        }
+        synchronized (startupLock) {
+            grpcRetryCount = 0;
+        }
+        transitionToState(ServiceStartupState.WAITING_FOR_PERMISSION);
+    }
+
+    private void transitionToState(ServiceStartupState newState) {
+        if (startupState == newState) {
+            updateForegroundNotification();
+            return;
+        }
+
+        startupState = newState;
+        updateForegroundNotification();
+    }
+
+    private void recordGrpcUnavailableIfNeeded(
+            String startupPhase,
+            String source,
+            Throwable error,
+            int attempt,
+            boolean bleExposed,
+            boolean dirconExposed
+    ) {
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastBackendReportAtMs < BACKEND_REPORT_THROTTLE_MS) {
+            return;
+        }
+
+        lastBackendReportAtMs = now;
+        SentryDiagnostics.recordGrpcBackendUnavailable(
+                startupPhase,
+                source,
+                error,
+                attempt,
+                bleExposed,
+                dirconExposed
+        );
+    }
+
+    private void recordMissingPermissionsIfNeeded(String source, boolean bleExposed, boolean dirconExposed) {
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastPermissionReportAtMs < BACKEND_REPORT_THROTTLE_MS) {
+            return;
+        }
+
+        lastPermissionReportAtMs = now;
+        SentryDiagnostics.recordMissingBluetoothPermissions(
+                "waiting_for_permission",
+                source,
+                BluetoothPermissionGate.describeMissingPermissions(this),
+                bleExposed,
+                dirconExposed
+        );
+    }
+
+    private boolean isBleExposed() {
+        return gattServer != null || advertiser != null;
+    }
+
+    private boolean isDirconExposed() {
+        return dirconServer != null;
     }
 
     // --- GATT Server ---
 
     private void setupGattServer() {
-        BluetoothAdapter adapter = bluetoothManager.getAdapter();
+        if (!BluetoothPermissionGate.hasRequiredPermissions(this)) {
+            Log.w(LOG_TAG, "Skipping GATT server setup because Bluetooth permissions are missing");
+            return;
+        }
+
+        BluetoothAdapter adapter = bluetoothManager != null ? bluetoothManager.getAdapter() : null;
         if (adapter == null || !adapter.isEnabled()) {
             Log.e(LOG_TAG, "Bluetooth not available or not enabled");
             return;
         }
 
+        closeGattServer();
         gattServer = bluetoothManager.openGattServer(this, gattServerCallback);
         if (gattServer == null) {
             Log.e(LOG_TAG, "Failed to open GATT server");
@@ -198,66 +490,68 @@ public class FTMSService extends Service {
         }
 
         BluetoothGattService ftmsService = new BluetoothGattService(
-                FTMS_SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY);
+                FTMS_SERVICE_UUID,
+                BluetoothGattService.SERVICE_TYPE_PRIMARY
+        );
 
-        // Fitness Machine Feature (Read)
         BluetoothGattCharacteristic featureChar = new BluetoothGattCharacteristic(
                 FITNESS_MACHINE_FEATURE_UUID,
                 BluetoothGattCharacteristic.PROPERTY_READ,
-                BluetoothGattCharacteristic.PERMISSION_READ);
+                BluetoothGattCharacteristic.PERMISSION_READ
+        );
         ftmsService.addCharacteristic(featureChar);
 
-        // Treadmill Data (Notify)
         treadmillDataCharacteristic = new BluetoothGattCharacteristic(
                 TREADMILL_DATA_UUID,
                 BluetoothGattCharacteristic.PROPERTY_NOTIFY,
-                0);
+                0
+        );
         treadmillDataCharacteristic.addDescriptor(createCCCD());
         ftmsService.addCharacteristic(treadmillDataCharacteristic);
 
-        // Indoor Bike Data (Notify)
         indoorBikeDataCharacteristic = new BluetoothGattCharacteristic(
                 INDOOR_BIKE_DATA_UUID,
                 BluetoothGattCharacteristic.PROPERTY_NOTIFY,
-                0);
+                0
+        );
         indoorBikeDataCharacteristic.addDescriptor(createCCCD());
         ftmsService.addCharacteristic(indoorBikeDataCharacteristic);
 
-        // Control Point (Write + Indicate)
         controlPointCharacteristic = new BluetoothGattCharacteristic(
                 CONTROL_POINT_UUID,
                 BluetoothGattCharacteristic.PROPERTY_WRITE | BluetoothGattCharacteristic.PROPERTY_INDICATE,
-                BluetoothGattCharacteristic.PERMISSION_WRITE);
+                BluetoothGattCharacteristic.PERMISSION_WRITE
+        );
         controlPointCharacteristic.addDescriptor(createCCCD());
         ftmsService.addCharacteristic(controlPointCharacteristic);
 
-        // Machine Status (Notify)
         machineStatusCharacteristic = new BluetoothGattCharacteristic(
                 MACHINE_STATUS_UUID,
                 BluetoothGattCharacteristic.PROPERTY_NOTIFY,
-                0);
+                0
+        );
         machineStatusCharacteristic.addDescriptor(createCCCD());
         ftmsService.addCharacteristic(machineStatusCharacteristic);
 
-        // Supported Speed Range (Read)
         BluetoothGattCharacteristic speedRangeChar = new BluetoothGattCharacteristic(
                 SUPPORTED_SPEED_RANGE_UUID,
                 BluetoothGattCharacteristic.PROPERTY_READ,
-                BluetoothGattCharacteristic.PERMISSION_READ);
+                BluetoothGattCharacteristic.PERMISSION_READ
+        );
         ftmsService.addCharacteristic(speedRangeChar);
 
-        // Supported Inclination Range (Read)
         BluetoothGattCharacteristic inclinationRangeChar = new BluetoothGattCharacteristic(
                 SUPPORTED_INCLINATION_RANGE_UUID,
                 BluetoothGattCharacteristic.PROPERTY_READ,
-                BluetoothGattCharacteristic.PERMISSION_READ);
+                BluetoothGattCharacteristic.PERMISSION_READ
+        );
         ftmsService.addCharacteristic(inclinationRangeChar);
 
-        // Supported Resistance Range (Read)
         BluetoothGattCharacteristic resistanceRangeChar = new BluetoothGattCharacteristic(
                 SUPPORTED_RESISTANCE_RANGE_UUID,
                 BluetoothGattCharacteristic.PROPERTY_READ,
-                BluetoothGattCharacteristic.PERMISSION_READ);
+                BluetoothGattCharacteristic.PERMISSION_READ
+        );
         ftmsService.addCharacteristic(resistanceRangeChar);
 
         gattServer.addService(ftmsService);
@@ -267,7 +561,8 @@ public class FTMSService extends Service {
     private BluetoothGattDescriptor createCCCD() {
         BluetoothGattDescriptor cccd = new BluetoothGattDescriptor(
                 CCCD_UUID,
-                BluetoothGattDescriptor.PERMISSION_READ | BluetoothGattDescriptor.PERMISSION_WRITE);
+                BluetoothGattDescriptor.PERMISSION_READ | BluetoothGattDescriptor.PERMISSION_WRITE
+        );
         cccd.setValue(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE);
         return cccd;
     }
@@ -276,17 +571,25 @@ public class FTMSService extends Service {
         @Override
         public void onConnectionStateChange(BluetoothDevice device, int status, int newState) {
             if (newState == BluetoothGatt.STATE_CONNECTED) {
-                Log.i(LOG_TAG, "Device connected: " + device.getAddress());
+                Log.i(LOG_TAG, "Device connected: " + safeDeviceLabel(device));
             } else if (newState == BluetoothGatt.STATE_DISCONNECTED) {
-                Log.i(LOG_TAG, "Device disconnected: " + device.getAddress());
+                Log.i(LOG_TAG, "Device disconnected: " + safeDeviceLabel(device));
                 subscribedDevices.remove(device);
                 controlGranted = false;
             }
         }
 
         @Override
-        public void onCharacteristicReadRequest(BluetoothDevice device, int requestId, int offset,
-                                                 BluetoothGattCharacteristic characteristic) {
+        public void onCharacteristicReadRequest(
+                BluetoothDevice device,
+                int requestId,
+                int offset,
+                BluetoothGattCharacteristic characteristic
+        ) {
+            if (gattServer == null) {
+                return;
+            }
+
             UUID uuid = characteristic.getUuid();
 
             if (uuid.equals(FITNESS_MACHINE_FEATURE_UUID)) {
@@ -300,7 +603,7 @@ public class FTMSService extends Service {
                 int maxSpeed = (int) (getMaxSpeedKph() * 100);
                 writeUint16LE(value, 0, minSpeed);
                 writeUint16LE(value, 2, maxSpeed);
-                writeUint16LE(value, 4, 10);    // step: 0.10 km/h
+                writeUint16LE(value, 4, 10);
                 gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset,
                         Arrays.copyOfRange(value, offset, value.length));
 
@@ -310,7 +613,7 @@ public class FTMSService extends Service {
                 int maxIncline = (int) (getMaxInclinePercent() * 10);
                 writeInt16LE(value, 0, minIncline);
                 writeInt16LE(value, 2, maxIncline);
-                writeUint16LE(value, 4, 5);     // step: 0.5%
+                writeUint16LE(value, 4, 5);
                 gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset,
                         Arrays.copyOfRange(value, offset, value.length));
 
@@ -320,7 +623,7 @@ public class FTMSService extends Service {
                 int maxRes = (int) (getMaxResistance() * 10);
                 writeUint16LE(value, 0, minRes);
                 writeUint16LE(value, 2, maxRes);
-                writeUint16LE(value, 4, 10);    // step: 1.0
+                writeUint16LE(value, 4, 10);
                 gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset,
                         Arrays.copyOfRange(value, offset, value.length));
 
@@ -330,32 +633,46 @@ public class FTMSService extends Service {
         }
 
         @Override
-        public void onCharacteristicWriteRequest(BluetoothDevice device, int requestId,
-                                                  BluetoothGattCharacteristic characteristic,
-                                                  boolean preparedWrite, boolean responseNeeded,
-                                                  int offset, byte[] value) {
+        public void onCharacteristicWriteRequest(
+                BluetoothDevice device,
+                int requestId,
+                BluetoothGattCharacteristic characteristic,
+                boolean preparedWrite,
+                boolean responseNeeded,
+                int offset,
+                byte[] value
+        ) {
+            if (gattServer == null) {
+                return;
+            }
+
             if (characteristic.getUuid().equals(CONTROL_POINT_UUID)) {
                 byte[] response = handleControlPoint(value);
                 if (responseNeeded) {
                     gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null);
                 }
-                // Send indication with the response
                 controlPointCharacteristic.setValue(response);
                 gattServer.notifyCharacteristicChanged(device, controlPointCharacteristic, true);
-            } else {
-                if (responseNeeded) {
-                    gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null);
-                }
+            } else if (responseNeeded) {
+                gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null);
             }
         }
 
         @Override
-        public void onDescriptorReadRequest(BluetoothDevice device, int requestId, int offset,
-                                             BluetoothGattDescriptor descriptor) {
+        public void onDescriptorReadRequest(
+                BluetoothDevice device,
+                int requestId,
+                int offset,
+                BluetoothGattDescriptor descriptor
+        ) {
+            if (gattServer == null) {
+                return;
+            }
+
             if (descriptor.getUuid().equals(CCCD_UUID)) {
-                byte[] value = subscribedDevices.contains(device) ?
-                        BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE :
-                        BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE;
+                byte[] value = subscribedDevices.contains(device)
+                        ? BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                        : BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE;
                 gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value);
             } else {
                 gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null);
@@ -363,36 +680,39 @@ public class FTMSService extends Service {
         }
 
         @Override
-        public void onDescriptorWriteRequest(BluetoothDevice device, int requestId,
-                                              BluetoothGattDescriptor descriptor,
-                                              boolean preparedWrite, boolean responseNeeded,
-                                              int offset, byte[] value) {
+        public void onDescriptorWriteRequest(
+                BluetoothDevice device,
+                int requestId,
+                BluetoothGattDescriptor descriptor,
+                boolean preparedWrite,
+                boolean responseNeeded,
+                int offset,
+                byte[] value
+        ) {
+            if (gattServer == null) {
+                return;
+            }
+
             if (descriptor.getUuid().equals(CCCD_UUID)) {
-                if (Arrays.equals(value, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ||
-                    Arrays.equals(value, BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)) {
+                if (Arrays.equals(value, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                        || Arrays.equals(value, BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)) {
                     subscribedDevices.add(device);
-                    Log.i(LOG_TAG, "Device subscribed: " + device.getAddress());
+                    Log.i(LOG_TAG, "Device subscribed: " + safeDeviceLabel(device));
                 } else {
                     subscribedDevices.remove(device);
-                    Log.i(LOG_TAG, "Device unsubscribed: " + device.getAddress());
+                    Log.i(LOG_TAG, "Device unsubscribed: " + safeDeviceLabel(device));
                 }
                 if (responseNeeded) {
                     gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null);
                 }
-            } else {
-                if (responseNeeded) {
-                    gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null);
-                }
+            } else if (responseNeeded) {
+                gattServer.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null);
             }
         }
     };
 
-    /**
-     * Called by DirconServer when an incline command arrives via DIRCON,
-     * so the BLE side knows not to treat the resulting change as manual.
-     */
     public void setFtmsTargetIncline(double incline) {
-        this.ftmsTargetIncline = incline;
+        inclineCommandTracker.setTargetIncline(incline, System.currentTimeMillis());
     }
 
     // --- Control Point ---
@@ -439,8 +759,7 @@ public class FTMSService extends Service {
                     int inclRaw = readInt16LE(value, 1);
                     double inclination = inclRaw / 10.0;
                     Log.i(LOG_TAG, "Set target inclination: " + inclination + "% (via gRPC)");
-                    ftmsTargetIncline = inclination;
-                    // Notify DIRCON so it doesn't treat this as a manual change
+                    setFtmsTargetIncline(inclination);
                     if (dirconServer != null) {
                         dirconServer.setFtmsTargetIncline(inclination);
                     }
@@ -476,7 +795,6 @@ public class FTMSService extends Service {
 
     private byte[] buildFeatureValue() {
         byte[] value = new byte[8];
-
         boolean isBike = grpc != null && grpc.isBikeDevice();
 
         if (isBike) {
@@ -485,7 +803,6 @@ public class FTMSService extends Service {
             int targets = (1 << 2);
             writeUint32LE(value, 4, targets);
         } else {
-            // Treadmill/Incline Trainer
             int features = (1 << 0) | (1 << 1) | (1 << 13);
             writeUint32LE(value, 0, features);
             int targets = (1 << 0) | (1 << 1);
@@ -524,16 +841,18 @@ public class FTMSService extends Service {
     // --- BLE Advertising ---
 
     private void startAdvertising() {
-        BluetoothAdapter adapter = bluetoothManager.getAdapter();
+        if (!BluetoothPermissionGate.hasRequiredPermissions(this)) {
+            Log.w(LOG_TAG, "Skipping BLE advertising because Bluetooth permissions are missing");
+            return;
+        }
+
+        BluetoothAdapter adapter = bluetoothManager != null ? bluetoothManager.getAdapter() : null;
         if (adapter == null) {
             Log.e(LOG_TAG, "No Bluetooth adapter");
             return;
         }
 
-        // Keep the BLE identity stable and simple across equipment types so
-        // users see the same name in both BLE and DIRCON pairing flows.
-        String bleName = ADVERTISED_DEVICE_NAME;
-        adapter.setName(bleName);
+        adapter.setName(ADVERTISED_DEVICE_NAME);
 
         advertiser = adapter.getBluetoothLeAdvertiser();
         if (advertiser == null) {
@@ -558,7 +877,7 @@ public class FTMSService extends Service {
                 .build();
 
         advertiser.startAdvertising(settings, data, scanResponse, advertiseCallback);
-        Log.i(LOG_TAG, "Started BLE advertising as \"" + bleName + "\"");
+        Log.i(LOG_TAG, "Started BLE advertising as \"" + ADVERTISED_DEVICE_NAME + "\"");
     }
 
     private void stopAdvertising() {
@@ -568,6 +887,7 @@ public class FTMSService extends Service {
             } catch (Exception e) {
                 Log.e(LOG_TAG, "Error stopping advertising", e);
             }
+            advertiser = null;
         }
     }
 
@@ -586,6 +906,10 @@ public class FTMSService extends Service {
     // --- Notification Loop ---
 
     private void startNotificationLoop() {
+        if (notificationRunnable != null) {
+            return;
+        }
+
         notificationRunnable = new Runnable() {
             @Override
             public void run() {
@@ -599,15 +923,20 @@ public class FTMSService extends Service {
     private void stopNotificationLoop() {
         if (handler != null && notificationRunnable != null) {
             handler.removeCallbacks(notificationRunnable);
+            notificationRunnable = null;
         }
     }
 
     private void sendDataNotifications() {
-        if (gattServer == null || subscribedDevices.isEmpty() || grpc == null) {
+        if (!BluetoothPermissionGate.hasRequiredPermissions(this)) {
+            handleMissingPermissions("notification_loop");
             return;
         }
 
-        // Check for manual incline change (hardware controls, not FTMS command)
+        if (gattServer == null || subscribedDevices.isEmpty() || grpc == null || !grpc.isConnected()) {
+            return;
+        }
+
         checkForManualInclineChange();
 
         boolean isBike = grpc.isBikeDevice();
@@ -624,54 +953,21 @@ public class FTMSService extends Service {
                     gattServer.notifyCharacteristicChanged(device, treadmillDataCharacteristic, false);
                 }
             } catch (Exception e) {
-                Log.e(LOG_TAG, "Error sending notification to " + device.getAddress(), e);
+                Log.e(LOG_TAG, "Error sending notification to " + safeDeviceLabel(device), e);
             }
         }
     }
 
-    /**
-     * Detects incline changes from hardware controls and sends a Machine Status
-     * notification (Target Inclination Changed, opcode 0x08). If the incline is
-     * moving toward the FTMS-commanded target, it's treated as an FTMS-initiated
-     * change. If it moves to a value that doesn't match the FTMS target, it's
-     * a manual override from hardware controls.
-     */
     private void checkForManualInclineChange() {
         double currentIncline = grpc.getLastInclinePercent();
-
-        if (Double.isNaN(lastNotifiedIncline)) {
-            lastNotifiedIncline = currentIncline;
+        InclineCommandTracker.ChangeResult changeResult = inclineCommandTracker.updateObservedIncline(
+                currentIncline,
+                System.currentTimeMillis()
+        );
+        if (changeResult != InclineCommandTracker.ChangeResult.MANUAL_OVERRIDE) {
             return;
         }
 
-        if (currentIncline == lastNotifiedIncline) {
-            return;
-        }
-
-        double previousIncline = lastNotifiedIncline;
-        lastNotifiedIncline = currentIncline;
-
-        // If FTMS has a target and current incline is moving toward it, skip notification
-        if (!Double.isNaN(ftmsTargetIncline)) {
-            double prevDistance = Math.abs(previousIncline - ftmsTargetIncline);
-            double currDistance = Math.abs(currentIncline - ftmsTargetIncline);
-
-            if (currDistance < prevDistance || currDistance <= INCLINE_TOLERANCE) {
-                // Moving toward or arrived at the FTMS target — not a manual change
-                if (currDistance <= INCLINE_TOLERANCE) {
-                    // Arrived at target, clear it
-                    ftmsTargetIncline = Double.NaN;
-                }
-                return;
-            }
-
-            // Moving away from FTMS target — this is a manual override
-            ftmsTargetIncline = Double.NaN;
-        }
-
-        // Manual change from hardware controls — notify connected devices
-        // FTMS Machine Status opcode 0x06 = Target Inclination Changed
-        // Parameter: int16 LE, resolution 0.1%
         int inclRaw = (int) (currentIncline * 10);
         byte[] status = new byte[3];
         status[0] = 0x06;
@@ -684,77 +980,67 @@ public class FTMSService extends Service {
                 machineStatusCharacteristic.setValue(status);
                 gattServer.notifyCharacteristicChanged(device, machineStatusCharacteristic, false);
             } catch (Exception e) {
-                Log.e(LOG_TAG, "Error sending Machine Status to " + device.getAddress(), e);
+                Log.e(LOG_TAG, "Error sending Machine Status to " + safeDeviceLabel(device), e);
             }
         }
 
-        // Also notify DIRCON clients
         if (dirconServer != null) {
             dirconServer.sendMachineStatusToAll(status);
         }
     }
 
-    // --- Data Builders (now powered by gRPC subscriptions) ---
+    // --- Data Builders ---
 
     private byte[] buildTreadmillData() {
-        // Flags (uint16 LE) per FTMS spec Table 4.7:
-        //   bit 0 = 0: instantaneous speed IS present
-        //   bit 2 = 1: total distance present
-        //   bit 3 = 1: inclination + ramp angle present
-        // Flags = 0x000C (bits 2 and 3 set)
         byte[] data = new byte[11];
 
         writeUint16LE(data, 0, 0x000C);
 
-        // Instantaneous Speed (uint16 LE, resolution 0.01 km/h)
         int speed = (int) (grpc.getLastSpeedKph() * 100);
-        if (speed < 0) speed = 0;
+        if (speed < 0) {
+            speed = 0;
+        }
         writeUint16LE(data, 2, speed);
 
-        // Total Distance (uint24 LE, resolution 1 meter)
         int distMeters = (int) (grpc.getLastDistanceKm() * 1000);
-        if (distMeters < 0) distMeters = 0;
+        if (distMeters < 0) {
+            distMeters = 0;
+        }
         data[4] = (byte) (distMeters & 0xFF);
         data[5] = (byte) ((distMeters >> 8) & 0xFF);
         data[6] = (byte) ((distMeters >> 16) & 0xFF);
 
-        // Inclination (int16 LE, resolution 0.1%)
         int inclination = (int) (grpc.getLastInclinePercent() * 10);
         writeInt16LE(data, 7, inclination);
-
-        // Ramp Angle Setting (int16 LE, resolution 0.1 degrees) — set to 0
         writeInt16LE(data, 9, 0);
 
         return data;
     }
 
     private byte[] buildIndoorBikeData() {
-        // Flags: bits 2, 5, 6 set = 0x0064
         byte[] data = new byte[10];
 
         writeUint16LE(data, 0, 0x0064);
 
-        // Instantaneous Speed (uint16 LE, resolution 0.01 km/h)
         int speed = (int) (grpc.getLastSpeedKph() * 100);
-        if (speed < 0) speed = 0;
+        if (speed < 0) {
+            speed = 0;
+        }
         writeUint16LE(data, 2, speed);
 
-        // Instantaneous Cadence (uint16 LE, resolution 0.5 rpm)
         int cadence = (int) (grpc.getLastCadenceRpm() * 2);
         writeUint16LE(data, 4, cadence);
 
-        // Resistance Level (int16 LE, resolution 0.1)
         int resistance = (int) (grpc.getLastResistance() * 10);
         writeInt16LE(data, 6, resistance);
 
-        // Instantaneous Power (int16 LE, watts)
         int power = (int) grpc.getLastWatts();
         writeInt16LE(data, 8, power);
 
         return data;
     }
 
-    // --- GATT Server Cleanup ---
+    // --- Cleanup ---
 
     private void closeGattServer() {
         if (gattServer != null) {
@@ -765,6 +1051,16 @@ public class FTMSService extends Service {
             }
             gattServer = null;
         }
+    }
+
+    private String safeDeviceLabel(BluetoothDevice device) {
+        if (device == null) {
+            return "unknown-device";
+        }
+        if (!BluetoothPermissionGate.hasRequiredPermissions(this)) {
+            return "permission-blocked-device";
+        }
+        return device.getAddress();
     }
 
     // --- Byte Helpers ---
@@ -792,7 +1088,9 @@ public class FTMSService extends Service {
 
     private static int readInt16LE(byte[] data, int offset) {
         int val = (data[offset] & 0xFF) | ((data[offset + 1] & 0xFF) << 8);
-        if (val >= 0x8000) val -= 0x10000;
+        if (val >= 0x8000) {
+            val -= 0x10000;
+        }
         return val;
     }
 }

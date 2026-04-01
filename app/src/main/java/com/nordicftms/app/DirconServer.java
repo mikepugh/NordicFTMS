@@ -191,12 +191,17 @@ public class DirconServer {
     private double simWindResistance = 0.4;
 
     // Incline tracking for DIRCON clients (mirrors FTMSService behavior)
-    private double lastNotifiedIncline = Double.NaN;
-    private double ftmsTargetIncline = Double.NaN;
     private boolean controlGranted = false;
     private static final double INCLINE_TOLERANCE = 0.3;
+    private static final long COMMAND_INTENT_RETENTION_MS = 5000L;
+    private static final int MAX_PENDING_INCLINE_TARGETS = 12;
     private static final long MANUAL_OVERRIDE_IGNORE_MS = 5000L;
     private static final long MANUAL_OVERRIDE_REASSERT_DELAY_MS = 750L;
+    private final InclineCommandTracker inclineCommandTracker = new InclineCommandTracker(
+            INCLINE_TOLERANCE,
+            COMMAND_INTENT_RETENTION_MS,
+            MAX_PENDING_INCLINE_TARGETS
+    );
     private volatile boolean manualOverrideStatusActive = false;
     private volatile long manualOverrideIgnoreUntilMs = 0L;
     /**
@@ -778,7 +783,7 @@ public class DirconServer {
                             "DIRCON FTMS", requestedInclination, inclination)) {
                         return new byte[]{(byte) 0x80, opcode, 0x01};
                     }
-                    ftmsTargetIncline = inclination;
+                    setFtmsTargetIncline(inclination);
                     // Also notify FTMSService so BLE clients don't see this as manual
                     ftmsService.setFtmsTargetIncline(inclination);
                     if (grpc != null) grpc.setIncline(inclination);
@@ -898,7 +903,7 @@ public class DirconServer {
         }
 
         // Set FTMS target so manual incline detection doesn't fire
-        ftmsTargetIncline = inclinePercent;
+        setFtmsTargetIncline(inclinePercent);
         ftmsService.setFtmsTargetIncline(inclinePercent);
 
         // Apply to treadmill via gRPC
@@ -939,7 +944,7 @@ public class DirconServer {
         }
 
         // Set FTMS target so manual incline detection doesn't fire
-        ftmsTargetIncline = inclinePercent;
+        setFtmsTargetIncline(inclinePercent);
         ftmsService.setFtmsTargetIncline(inclinePercent);
 
         // Apply to treadmill via gRPC
@@ -1142,32 +1147,20 @@ public class DirconServer {
 
     // --- Manual Incline Detection (mirrors FTMSService logic) ---
 
+    /**
+     * GlassOS reports target incline changes, so a reported incline is treated
+     * as commanded only if it matches a recent FTMS or DIRCON target we sent.
+     * Unmatched target changes are treated as local/manual console overrides.
+     */
     private void checkForManualInclineChange() {
         if (grpc == null) return;
         double currentIncline = grpc.getLastInclinePercent();
-
-        if (Double.isNaN(lastNotifiedIncline)) {
-            lastNotifiedIncline = currentIncline;
+        InclineCommandTracker.ChangeResult changeResult = inclineCommandTracker.updateObservedIncline(
+                currentIncline,
+                System.currentTimeMillis()
+        );
+        if (changeResult != InclineCommandTracker.ChangeResult.MANUAL_OVERRIDE) {
             return;
-        }
-
-        if (currentIncline == lastNotifiedIncline) return;
-
-        double previousIncline = lastNotifiedIncline;
-        lastNotifiedIncline = currentIncline;
-
-        // If FTMS has a target and current incline is moving toward it, skip
-        if (!Double.isNaN(ftmsTargetIncline)) {
-            double prevDistance = Math.abs(previousIncline - ftmsTargetIncline);
-            double currDistance = Math.abs(currentIncline - ftmsTargetIncline);
-
-            if (currDistance < prevDistance || currDistance <= INCLINE_TOLERANCE) {
-                if (currDistance <= INCLINE_TOLERANCE) {
-                    ftmsTargetIncline = Double.NaN;
-                }
-                return;
-            }
-            ftmsTargetIncline = Double.NaN;
         }
 
         // Manual change detected — send Machine Status to DIRCON clients
@@ -1201,7 +1194,7 @@ public class DirconServer {
      * so DIRCON knows not to treat the resulting change as manual.
      */
     public void setFtmsTargetIncline(double incline) {
-        this.ftmsTargetIncline = incline;
+        inclineCommandTracker.setTargetIncline(incline, System.currentTimeMillis());
     }
 
     private void reassertManualIncline(double inclinePercent, String source) {
@@ -1210,7 +1203,7 @@ public class DirconServer {
         }
 
         // Mirror the user's manual choice so any in-flight Zwift command gets overwritten.
-        ftmsTargetIncline = inclinePercent;
+        setFtmsTargetIncline(inclinePercent);
         ftmsService.setFtmsTargetIncline(inclinePercent);
         Log.i(LOG_TAG, String.format(
                 "Reasserting manual incline via %s: %.1f%% (immediate)",
@@ -1239,7 +1232,7 @@ public class DirconServer {
                     return;
                 }
 
-                ftmsTargetIncline = inclinePercent;
+                setFtmsTargetIncline(inclinePercent);
                 ftmsService.setFtmsTargetIncline(inclinePercent);
                 Log.i(LOG_TAG, String.format(
                         "Reasserting manual incline via %s: %.1f%% (follow-up after %dms, current=%.1f%%)",

@@ -4,6 +4,7 @@ import com.ifit.glassos.ConsoleInfo;
 import com.ifit.glassos.ConsoleType;
 
 import io.sentry.Sentry;
+import io.sentry.SentryLevel;
 
 /**
  * Small, low-volume Sentry helpers for field diagnostics.
@@ -88,6 +89,47 @@ public final class SentryDiagnostics {
         if (error != null) {
             Sentry.captureException(error);
         }
+    }
+
+    public static void recordMissingBluetoothPermissions(
+            String startupPhase,
+            String bootSource,
+            String missingPermissions,
+            boolean bleExposed,
+            boolean dirconExposed
+    ) {
+        Sentry.withScope(scope -> {
+            scope.setLevel(SentryLevel.WARNING);
+            scope.setTag("startup_phase", emptyToUnknown(startupPhase));
+            scope.setTag("boot_source", emptyToUnknown(bootSource));
+            scope.setTag("missing_permissions", emptyToUnknown(missingPermissions));
+            scope.setTag("ble_exposed", Boolean.toString(bleExposed));
+            scope.setTag("dircon_exposed", Boolean.toString(dirconExposed));
+            Sentry.captureMessage("Bluetooth runtime permissions missing", SentryLevel.WARNING);
+        });
+    }
+
+    public static void recordGrpcBackendUnavailable(
+            String startupPhase,
+            String source,
+            Throwable error,
+            int attempt,
+            boolean bleExposed,
+            boolean dirconExposed
+    ) {
+        Sentry.withScope(scope -> {
+            scope.setLevel(SentryLevel.WARNING);
+            scope.setTag("startup_phase", emptyToUnknown(startupPhase));
+            scope.setTag("grpc_source", emptyToUnknown(source));
+            scope.setTag("grpc_attempt", Integer.toString(Math.max(0, attempt)));
+            scope.setTag("ble_exposed", Boolean.toString(bleExposed));
+            scope.setTag("dircon_exposed", Boolean.toString(dirconExposed));
+            if (error != null) {
+                Sentry.captureException(error);
+            } else {
+                Sentry.captureMessage("GlassOS backend unavailable", SentryLevel.WARNING);
+            }
+        });
     }
 
     public static void recordDirconProfileSelection(

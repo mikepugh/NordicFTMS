@@ -14,6 +14,7 @@
         android:padding="32dp">
 
         <TextView
+            android:id="@+id/title_text"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="NordicFTMS"
@@ -21,21 +22,38 @@
             android:textStyle="bold" />
 
         <TextView
+            android:id="@+id/status_text"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
             android:text="BLE FTMS server is running in the background."
-            android:textSize="16sp"
-            android:gravity="center" />
+            android:textAlignment="center"
+            android:textSize="16sp" />
 
         <TextView
+            android:id="@+id/detail_text"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
             android:text="Connect with any FTMS-compatible app."
-            android:textSize="14sp"
-            android:gravity="center"
-            android:textColor="#888888" />
+            android:textAlignment="center"
+            android:textColor="#888888"
+            android:textSize="14sp" />
+
+        <Button
+            android:id="@+id/grant_permission_button"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="Grant Bluetooth Access" />
+
+        <Button
+            android:id="@+id/open_settings_button"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Open App Settings"
+            android:visibility="gone" />
 
     </LinearLayout>
 
