@@ -1,60 +1,298 @@
 <?xml version="1.0" encoding="utf-8"?>
-<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
-    xmlns:tools="http://schemas.android.com/tools"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    tools:context=".MainActivity">
+    android:fillViewport="true">
 
     <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:gravity="center"
+        android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="32dp">
+        android:padding="24dp">
 
         <TextView
             android:id="@+id/title_text"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="NordicFTMS"
+            android:text="NordicFTMS Console"
             android:textSize="28sp"
             android:textStyle="bold" />
 
         <TextView
             android:id="@+id/status_text"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:text="BLE FTMS server is running in the background."
-            android:textAlignment="center"
-            android:textSize="16sp" />
+            android:layout_marginTop="12dp"
+            android:text="Waiting for status..."
+            android:textSize="18sp"
+            android:textStyle="bold" />
 
         <TextView
             android:id="@+id/detail_text"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="Open NordicFTMS to view Bluetooth, backend, and machine status."
+            android:textColor="#FF555555"
+            android:textSize="14sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Service"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/service_state_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Service state: --" />
+
+            <TextView
+                android:id="@+id/permission_state_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Bluetooth permissions: --" />
+
+            <TextView
+                android:id="@+id/backend_state_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Backend: --" />
+
+            <TextView
+                android:id="@+id/ble_state_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Bluetooth peripheral: --" />
+
+            <TextView
+                android:id="@+id/dircon_profile_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="DIRCON profile: --" />
+
+            <TextView
+                android:id="@+id/advertised_name_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="FTMS name: --" />
+
+            <TextView
+                android:id="@+id/dircon_name_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="DIRCON name: --" />
+
+            <TextView
+                android:id="@+id/reconnect_attempt_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Reconnect attempt: --" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Machine"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/machine_name_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Machine: --" />
+
+            <TextView
+                android:id="@+id/machine_type_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Machine type: --" />
+
+            <TextView
+                android:id="@+id/firmware_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Firmware: --" />
+
+            <TextView
+                android:id="@+id/serial_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Serial: --" />
+
+            <TextView
+                android:id="@+id/speed_range_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Speed range: --" />
+
+            <TextView
+                android:id="@+id/incline_range_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Incline range: --" />
+
+            <TextView
+                android:id="@+id/resistance_range_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Resistance range: --" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Live metrics"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/current_speed_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Current speed: --" />
+
+            <TextView
+                android:id="@+id/current_incline_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Current incline: --" />
+
+            <TextView
+                android:id="@+id/current_distance_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Distance: --" />
+
+            <TextView
+                android:id="@+id/current_resistance_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Resistance: --" />
+
+            <TextView
+                android:id="@+id/current_cadence_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Cadence: --" />
+
+            <TextView
+                android:id="@+id/current_watts_value"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Watts: --" />
+        </LinearLayout>
+
+        <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="Troubleshooting"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/last_error_value"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="Connect with any FTMS-compatible app."
-            android:textAlignment="center"
-            android:textColor="#888888"
-            android:textSize="14sp" />
+            android:text="Last error: none"
+            android:textColor="#FF7A1F1F" />
+
+        <com.google.android.material.switchmaterial.SwitchMaterial
+            android:id="@+id/detailed_tracing_switch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Enable detailed tracing and logging for troubleshooting" />
+
+        <com.google.android.material.switchmaterial.SwitchMaterial
+            android:id="@+id/kickr_run_switch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Use Kickr Run impersonation mode for treadmill apps" />
 
         <Button
             android:id="@+id/grant_permission_button"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
+            android:layout_marginTop="16dp"
             android:text="Grant Bluetooth Access" />
 
         <Button
             android:id="@+id/open_settings_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Open App Settings" />
+
+        <Button
+            android:id="@+id/retry_backend_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Retry Backend" />
+
+        <Button
+            android:id="@+id/restart_bluetooth_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Restart Bluetooth Peripheral" />
+
+        <Button
+            android:id="@+id/hide_to_background_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Hide to Background" />
+
+        <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="Open App Settings"
-            android:visibility="gone" />
+            android:layout_marginTop="24dp"
+            android:text="PowerTread"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/powertread_blurb"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="NordicFTMS works well with PowerTread. Visit PowerTread.fit for setup details, but NordicFTMS should work with any FTMS-compatible app." />
+
+        <Button
+            android:id="@+id/open_powertread_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Open PowerTread.fit" />
 
     </LinearLayout>
-
-</androidx.constraintlayout.widget.ConstraintLayout>
+</ScrollView>

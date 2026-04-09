@@ -184,6 +184,7 @@ public class DirconServer {
     private WifiManager.MulticastLock multicastLock;
     private final Object mdnsLock = new Object();
     private volatile Boolean advertisedTreadmillProfile;
+    private volatile String currentServiceName = "Unavailable";
 
     // Wahoo simulation state (from setSimMode)
     private double simWeight = 75.0;
@@ -257,6 +258,20 @@ public class DirconServer {
         );
 
         Log.i(LOG_TAG, "DIRCON server started on port " + DIRCON_PORT);
+    }
+
+    public void refreshProfileNow() {
+        maybeRefreshMdnsProfile();
+    }
+
+    public boolean isTreadmillProfileActive() {
+        return advertisedTreadmillProfile != null
+                ? advertisedTreadmillProfile
+                : isTreadmillDirconProfile();
+    }
+
+    public String getCurrentServiceName() {
+        return currentServiceName;
     }
 
     /**
@@ -1613,6 +1628,7 @@ public class DirconServer {
         );
         jmdns.registerService(serviceInfo);
         advertisedTreadmillProfile = treadmillProfile;
+        currentServiceName = serviceName;
 
         SentryDiagnostics.recordDirconProfileSelection(
                 grpc,
@@ -1620,6 +1636,9 @@ public class DirconServer {
                 props.get("ble-service-uuids"),
                 treadmillProfile
         );
+        if (ftmsService != null) {
+            ftmsService.onDirconAdvertisementUpdated(treadmillProfile, serviceName);
+        }
 
         Log.i(LOG_TAG, "mDNS registered as \"" + serviceName + "\" on port " + DIRCON_PORT
                 + " serial=" + dirconSerialNumber);
@@ -1633,6 +1652,7 @@ public class DirconServer {
                     jmdns.close();
                     jmdns = null;
                     advertisedTreadmillProfile = null;
+                    currentServiceName = "Unavailable";
                 }
             }
             if (multicastLock != null && multicastLock.isHeld()) {
@@ -1691,7 +1711,21 @@ public class DirconServer {
     }
 
     private String getDirconServiceName(String macAddress) {
-        if (!isTreadmillDirconProfile()) {
+        return resolveDirconServiceName(macAddress, isTreadmillDirconProfile());
+    }
+
+    private String getDirconBleServiceUuids() {
+        return resolveDirconBleServiceUuids(isTreadmillDirconProfile());
+    }
+
+    private boolean isTreadmillDirconProfile() {
+        return grpc != null
+                && grpc.isTreadmillDevice()
+                && NordicFtmsPreferences.isKickrRunModeEnabled(context);
+    }
+
+    static String resolveDirconServiceName(String macAddress, boolean treadmillProfile) {
+        if (!treadmillProfile) {
             return GENERIC_DIRCON_SERVICE_NAME;
         }
         String macHex = macAddress.replace("-", "");
@@ -1701,15 +1735,11 @@ public class DirconServer {
         return "KICKR RUN " + suffix;
     }
 
-    private String getDirconBleServiceUuids() {
-        if (!isTreadmillDirconProfile()) {
+    static String resolveDirconBleServiceUuids(boolean treadmillProfile) {
+        if (!treadmillProfile) {
             return "0x1826";
         }
         return "0x1826,0x1814,A026EE0E-0A7D-4AB3-97FA-F1500F9FEB8B";
-    }
-
-    private boolean isTreadmillDirconProfile() {
-        return grpc != null && grpc.isTreadmillDevice();
     }
 
     // --- Packet Building ---

@@ -8,6 +8,7 @@ import androidx.core.content.ContextCompat;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 public final class BluetoothPermissionGate {
     private BluetoothPermissionGate() {
@@ -34,6 +35,12 @@ public final class BluetoothPermissionGate {
 
     public static boolean hasRequiredPermissions(Context context) {
         return getMissingPermissions(context).length == 0;
+    }
+
+    public static ServiceStatusSnapshot.BluetoothPermissionState getPermissionState(Context context) {
+        return hasRequiredPermissions(context)
+                ? ServiceStatusSnapshot.BluetoothPermissionState.GRANTED
+                : ServiceStatusSnapshot.BluetoothPermissionState.MISSING;
     }
 
     public static String[] getMissingPermissions(Context context) {
@@ -72,7 +79,11 @@ public final class BluetoothPermissionGate {
     }
 
     public static String permissionDisplayLabel(String permission) {
-        return permissionToTagValue(permission).replace('_', ' ');
+        String label = permissionToTagValue(permission).toLowerCase(Locale.US).replace('_', ' ');
+        if (label.isEmpty()) {
+            return "Bluetooth access";
+        }
+        return Character.toUpperCase(label.charAt(0)) + label.substring(1);
     }
 
     private static String permissionToTagValue(String permission) {

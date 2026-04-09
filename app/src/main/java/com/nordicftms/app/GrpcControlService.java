@@ -1,8 +1,6 @@
 package com.nordicftms.app;
 
 import android.content.Context;
-import android.util.Log;
-
 import com.ifit.glassos.CadenceData;
 import com.ifit.glassos.CadenceServiceGrpc;
 import com.ifit.glassos.ConsoleInfo;
@@ -34,8 +32,11 @@ import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
@@ -59,6 +60,13 @@ public class GrpcControlService {
         void onGrpcBackendUnavailable(String source, Throwable error);
     }
 
+    private enum DisconnectReason {
+        NONE,
+        LOCAL_REQUEST,
+        CONNECT_RETRY,
+        BACKEND_FAILURE
+    }
+
     private static final String LOG_TAG = "GRPC";
     private static final String HOST = "localhost";
     private static final int PORT = 54321;
@@ -74,6 +82,9 @@ public class GrpcControlService {
     private final BackendUnavailableListener backendUnavailableListener;
     private final Object consoleInfoLock = new Object();
     private final AtomicBoolean backendUnavailableReported = new AtomicBoolean(false);
+    private final ScheduledExecutorService callbackExecutor = Executors.newSingleThreadScheduledExecutor();
+    private final AtomicLong generationCounter = new AtomicLong(0L);
+    private final NordicFtmsLogger logger = NordicFtmsLogger.getInstance();
 
     private ManagedChannel channel;
 
@@ -105,6 +116,8 @@ public class GrpcControlService {
     // Console info (populated once on connect)
     private volatile ConsoleInfo consoleInfo;
     private volatile ConsoleType machineType = ConsoleType.CONSOLE_TYPE_UNKNOWN;
+    private volatile ConsoleInfo cachedConsoleInfo;
+    private volatile ConsoleType cachedMachineType = ConsoleType.CONSOLE_TYPE_UNKNOWN;
     private volatile boolean connected = false;
     private volatile boolean advancedSubscriptionsStarted = false;
     private volatile boolean consoleInfoSubscriptionStarted = false;
@@ -112,6 +125,14 @@ public class GrpcControlService {
     private volatile String lastConsoleInfoFetchErrorSource = "unknown";
     private volatile Throwable lastConnectionError;
     private volatile String lastConnectionErrorSource = "unknown";
+    private volatile long activeGeneration = 0L;
+    private volatile DisconnectReason disconnectReason = DisconnectReason.NONE;
+    private volatile double cachedSpeedKph = 0.0;
+    private volatile double cachedInclinePercent = 0.0;
+    private volatile double cachedDistanceKm = 0.0;
+    private volatile double cachedResistance = 0.0;
+    private volatile double cachedCadenceRpm = 0.0;
+    private volatile double cachedWatts = 0.0;
 
     public GrpcControlService(Context context, BackendUnavailableListener listener) {
         this.appContext = context.getApplicationContext();
@@ -120,7 +141,10 @@ public class GrpcControlService {
 
     public synchronized boolean connect() {
         resetConnectionErrors();
-        disconnectInternal(false);
+        disconnectInternal(false, DisconnectReason.LOCAL_REQUEST);
+        long generation = generationCounter.incrementAndGet();
+        activeGeneration = generation;
+        disconnectReason = DisconnectReason.NONE;
 
         try {
             SSLSocketFactory sslSocketFactory = createSslSocketFactory();
@@ -131,8 +155,6 @@ public class GrpcControlService {
             channel = OkHttpChannelBuilder.forAddress(HOST, PORT)
                     .sslSocketFactory(sslSocketFactory)
                     .overrideAuthority("localhost")
-                    .keepAliveTime(30, TimeUnit.SECONDS)
-                    .keepAliveWithoutCalls(true)
                     .intercept(MetadataUtils.newAttachHeadersInterceptor(headers))
                     .build();
 
@@ -154,36 +176,42 @@ public class GrpcControlService {
             // Subscribe before readiness is decided so we do not miss the
             // initial ConsoleChanged push on GlassOS builds that publish the
             // real console capabilities shortly after transport startup.
-            subscribeConsoleInfo();
+            subscribeConsoleInfo(generation);
 
-            if (!resolveInitialConsoleInfo()) {
+            if (!resolveInitialConsoleInfo(generation)) {
                 lastConnectionError = lastConsoleInfoFetchError != null
                         ? lastConsoleInfoFetchError
                         : new IllegalStateException("Initial console info fetch did not return usable data");
                 lastConnectionErrorSource = lastConsoleInfoFetchErrorSource;
-                Log.w(LOG_TAG, "gRPC transport created but backend is not ready yet via "
-                        + lastConnectionErrorSource);
-                disconnectInternal(false);
+                logger.warn(appContext, "grpc_backend_not_ready", "gRPC transport created but backend is not ready yet via "
+                        + lastConnectionErrorSource, lastConnectionError);
+                disconnectInternal(false, DisconnectReason.CONNECT_RETRY);
                 return false;
             }
 
             connected = true;
             backendUnavailableReported.set(false);
-            Log.i(LOG_TAG, "gRPC backend ready on " + HOST + ":" + PORT + " with mTLS");
+            disconnectReason = DisconnectReason.NONE;
+            logger.info(appContext, "grpc_ready", "gRPC backend ready on " + HOST + ":" + PORT + " with mTLS");
             return true;
 
         } catch (Exception e) {
             lastConnectionError = e;
             lastConnectionErrorSource = "connect";
-            Log.e(LOG_TAG, "Failed to connect gRPC backend", e);
-            disconnectInternal(false);
+            logger.error(appContext, "grpc_connect_error", "Failed to connect gRPC backend", e);
+            disconnectInternal(false, DisconnectReason.CONNECT_RETRY);
             return false;
         }
     }
 
     public synchronized void disconnect() {
-        disconnectInternal(true);
+        disconnectInternal(true, DisconnectReason.LOCAL_REQUEST);
         backendUnavailableReported.set(false);
+    }
+
+    public synchronized void shutdown() {
+        disconnect();
+        callbackExecutor.shutdownNow();
     }
 
     public boolean isConnected() {
@@ -200,19 +228,22 @@ public class GrpcControlService {
 
     // --- Console Info ---
 
-    private boolean resolveInitialConsoleInfo() {
+    private boolean resolveInitialConsoleInfo(long generation) {
         lastConsoleInfoFetchError = null;
         lastConsoleInfoFetchErrorSource = "initial_console_info";
 
         for (int attempt = 1; attempt <= CONSOLE_INFO_FETCH_ATTEMPTS; attempt++) {
+            if (generation != activeGeneration) {
+                return false;
+            }
             if (hasUsableConsoleInfo()) {
                 return true;
             }
 
-            if (fetchConsoleInfoFromRpc(false, attempt)) {
+            if (fetchConsoleInfoFromRpc(false, attempt, generation)) {
                 return true;
             }
-            if (fetchConsoleInfoFromRpc(true, attempt)) {
+            if (fetchConsoleInfoFromRpc(true, attempt, generation)) {
                 return true;
             }
 
@@ -221,7 +252,7 @@ public class GrpcControlService {
             }
 
             if (attempt < CONSOLE_INFO_FETCH_ATTEMPTS) {
-                Log.w(LOG_TAG, "Console info not ready after attempt " + attempt
+                logger.info(appContext, "console_info_retry", "Console info not ready after attempt " + attempt
                         + ", retrying in " + CONSOLE_INFO_FETCH_RETRY_MS + " ms");
                 try {
                     Thread.sleep(CONSOLE_INFO_FETCH_RETRY_MS);
@@ -237,7 +268,7 @@ public class GrpcControlService {
         return hasUsableConsoleInfo();
     }
 
-    private boolean fetchConsoleInfoFromRpc(boolean useKnownConsoleInfo, int attempt) {
+    private boolean fetchConsoleInfoFromRpc(boolean useKnownConsoleInfo, int attempt, long generation) {
         String source = useKnownConsoleInfo ? "GetKnownConsoleInfo" : "GetConsole";
 
         try {
@@ -247,17 +278,27 @@ public class GrpcControlService {
                     : consoleStub.withDeadlineAfter(5, TimeUnit.SECONDS)
                     .getConsole(Empty.getDefaultInstance());
 
-            return applyConsoleInfo(source, fetchedConsoleInfo, attempt);
+            return applyConsoleInfo(source, fetchedConsoleInfo, attempt, generation);
         } catch (Exception e) {
-            Log.e(LOG_TAG, "Failed to fetch console info via " + source
-                    + " (attempt " + attempt + ")", e);
+            if (hasUsableConsoleInfo()) {
+                logger.info(appContext, "console_info_fetch_ignored", "Console info fetch via " + source
+                        + " failed on attempt " + attempt + " but usable console info is already cached");
+                return true;
+            }
+            if (isBackendUnavailableSignal(e) || isChannelShutdownSignal(e)) {
+                logger.info(appContext, "console_info_fetch_retryable", "Console info via " + source
+                        + " is not ready yet on attempt " + attempt + ": " + summarizeTransportError(e));
+            } else {
+                logger.error(appContext, "console_info_fetch_error", "Failed to fetch console info via " + source
+                        + " (attempt " + attempt + ")", e);
+            }
             lastConsoleInfoFetchError = e;
             lastConsoleInfoFetchErrorSource = source;
             return false;
         }
     }
 
-    private void subscribeConsoleInfo() {
+    private void subscribeConsoleInfo(long generation) {
         if (consoleAsyncStub == null || channel == null || consoleInfoSubscriptionStarted) {
             return;
         }
@@ -266,30 +307,35 @@ public class GrpcControlService {
         consoleAsyncStub.consoleChanged(Empty.getDefaultInstance(), new StreamObserver<ConsoleInfo>() {
             @Override
             public void onNext(ConsoleInfo updatedConsoleInfo) {
-                applyConsoleInfo("ConsoleChanged", updatedConsoleInfo, 0);
+                applyConsoleInfo("ConsoleChanged", updatedConsoleInfo, 0, generation);
             }
 
             @Override
             public void onError(Throwable t) {
                 consoleInfoSubscriptionStarted = false;
-                Log.e(LOG_TAG, "Console info subscription error", t);
-                boolean backendUnavailable = handleGrpcFailure("console_subscription", t);
-                if (!backendUnavailable) {
-                    retrySubscription(GrpcControlService.this::subscribeConsoleInfo, CONSOLE_INFO_STREAM_RETRY_MS);
-                } else if (!connected && channel != null) {
-                    retryConsoleInfoSubscription(CONSOLE_INFO_STREAM_RETRY_MS);
-                }
+                handleSubscriptionError(
+                        "console_subscription",
+                        "console_subscription_error",
+                        "Console info subscription error",
+                        t,
+                        generation,
+                        () -> subscribeConsoleInfo(generation),
+                        CONSOLE_INFO_STREAM_RETRY_MS
+                );
             }
 
             @Override
             public void onCompleted() {
                 consoleInfoSubscriptionStarted = false;
-                Log.i(LOG_TAG, "Console info subscription completed");
+                logger.info(appContext, "console_subscription_completed", "Console info subscription completed");
             }
         });
     }
 
-    private boolean applyConsoleInfo(String source, ConsoleInfo updatedConsoleInfo, int attempt) {
+    private boolean applyConsoleInfo(String source, ConsoleInfo updatedConsoleInfo, int attempt, long generation) {
+        if (generation != activeGeneration) {
+            return false;
+        }
         if (updatedConsoleInfo == null) {
             return false;
         }
@@ -306,7 +352,7 @@ public class GrpcControlService {
             }
 
             if (!infoUsable && previousInfoUsable) {
-                Log.w(LOG_TAG, "Ignoring empty console info from " + source
+                logger.warn(appContext, "console_info_empty_ignored", "Ignoring empty console info from " + source
                         + " because populated console info is already cached");
                 return false;
             }
@@ -314,6 +360,8 @@ public class GrpcControlService {
             ConsoleType previousMachineType = machineType;
             consoleInfo = updatedConsoleInfo;
             machineType = updatedConsoleInfo.getMachineType();
+            cachedConsoleInfo = updatedConsoleInfo;
+            cachedMachineType = updatedConsoleInfo.getMachineType();
             updatedMachineType = previousMachineType != machineType;
         }
 
@@ -340,19 +388,19 @@ public class GrpcControlService {
     private void logConsoleInfo(String source, ConsoleInfo updatedConsoleInfo, int attempt, boolean infoUsable) {
         String attemptSuffix = attempt > 0 ? " (attempt " + attempt + ")" : "";
 
-        Log.i(LOG_TAG, "Console info received via " + source + attemptSuffix
+        logger.info(appContext, "console_info_received", "Console info received via " + source + attemptSuffix
                 + " usable=" + infoUsable);
-        Log.i(LOG_TAG, "  Machine type: " + updatedConsoleInfo.getMachineType());
-        Log.i(LOG_TAG, "  Name: " + updatedConsoleInfo.getName());
-        Log.i(LOG_TAG, "  Speed range: " + updatedConsoleInfo.getMinKph()
-                + " - " + updatedConsoleInfo.getMaxKph() + " kph");
-        Log.i(LOG_TAG, "  Incline range: " + updatedConsoleInfo.getMinInclinePercent()
-                + " - " + updatedConsoleInfo.getMaxInclinePercent() + "%");
-        Log.i(LOG_TAG, "  Can set speed: " + updatedConsoleInfo.getCanSetSpeed());
-        Log.i(LOG_TAG, "  Can set incline: " + updatedConsoleInfo.getCanSetIncline());
-        Log.i(LOG_TAG, "  Can set resistance: " + updatedConsoleInfo.getCanSetResistance());
-        Log.i(LOG_TAG, "  Firmware: " + updatedConsoleInfo.getFirmwareVersion());
-        Log.i(LOG_TAG, "  Serial: " + updatedConsoleInfo.getProductSerialNumber());
+        logger.info(appContext, "console_info_details",
+                "Machine type=" + updatedConsoleInfo.getMachineType()
+                        + " name=" + updatedConsoleInfo.getName()
+                        + " speedRange=" + updatedConsoleInfo.getMinKph() + "-" + updatedConsoleInfo.getMaxKph()
+                        + " inclineRange=" + updatedConsoleInfo.getMinInclinePercent() + "-" + updatedConsoleInfo.getMaxInclinePercent()
+                        + " canSetSpeed=" + updatedConsoleInfo.getCanSetSpeed()
+                        + " canSetIncline=" + updatedConsoleInfo.getCanSetIncline()
+                        + " canSetResistance=" + updatedConsoleInfo.getCanSetResistance()
+                        + " firmware=" + updatedConsoleInfo.getFirmwareVersion()
+                        + " serial=" + updatedConsoleInfo.getProductSerialNumber());
+        NordicFtmsStatusStore.getInstance().setConsoleInfo(updatedConsoleInfo);
     }
 
     private boolean hasUsableConsoleInfo() {
@@ -392,34 +440,37 @@ public class GrpcControlService {
     }
 
     public ConsoleInfo getConsoleInfo() {
-        return consoleInfo;
+        return consoleInfo != null ? consoleInfo : cachedConsoleInfo;
     }
 
     public ConsoleType getMachineType() {
-        return machineType;
+        return machineType != ConsoleType.CONSOLE_TYPE_UNKNOWN ? machineType : cachedMachineType;
     }
 
     public boolean isBikeDevice() {
-        return machineType == ConsoleType.BIKE
-                || machineType == ConsoleType.SPIN_BIKE;
+        ConsoleType currentMachineType = getMachineType();
+        return currentMachineType == ConsoleType.BIKE
+                || currentMachineType == ConsoleType.SPIN_BIKE;
     }
 
     public boolean isTreadmillDevice() {
-        return machineType == ConsoleType.TREADMILL
-                || machineType == ConsoleType.INCLINE_TRAINER
-                || (machineType == ConsoleType.CONSOLE_TYPE_UNKNOWN
-                && isTreadmillLikeConsole(consoleInfo));
+        ConsoleType currentMachineType = getMachineType();
+        return currentMachineType == ConsoleType.TREADMILL
+                || currentMachineType == ConsoleType.INCLINE_TRAINER
+                || (currentMachineType == ConsoleType.CONSOLE_TYPE_UNKNOWN
+                && isTreadmillLikeConsole(getConsoleInfo()));
     }
 
     public boolean isRower() {
-        return machineType == ConsoleType.ROWER;
+        return getMachineType() == ConsoleType.ROWER;
     }
 
     public boolean isElliptical() {
-        return machineType == ConsoleType.ELLIPTICAL
-                || machineType == ConsoleType.VERTICAL_ELLIPTICAL
-                || machineType == ConsoleType.STRIDER
-                || machineType == ConsoleType.FREE_STRIDER;
+        ConsoleType currentMachineType = getMachineType();
+        return currentMachineType == ConsoleType.ELLIPTICAL
+                || currentMachineType == ConsoleType.VERTICAL_ELLIPTICAL
+                || currentMachineType == ConsoleType.STRIDER
+                || currentMachineType == ConsoleType.FREE_STRIDER;
     }
 
     // --- Control Commands ---
@@ -429,20 +480,23 @@ public class GrpcControlService {
             return;
         }
 
-        new Thread(() -> {
+        long generation = activeGeneration;
+        callbackExecutor.execute(() -> {
             try {
+                if (generation != activeGeneration || !connected || speedStub == null) {
+                    return;
+                }
                 SetSpeedRequest req = SetSpeedRequest.newBuilder().setKph(kph).build();
                 Result result = speedStub
                         .withDeadlineAfter(3, TimeUnit.SECONDS)
                         .setSpeed(req);
-                Log.i(LOG_TAG, "SetSpeed(" + kph + " kph) -> success=" + result.getSuccess());
+                logger.info(appContext, "grpc_set_speed", "SetSpeed(" + kph + " kph) -> success=" + result.getSuccess());
             } catch (StatusRuntimeException e) {
-                Log.e(LOG_TAG, "SetSpeed failed: " + e.getStatus(), e);
-                handleGrpcFailure("set_speed", e);
+                handleCommandFailure("set_speed", "grpc_set_speed_failed", "SetSpeed failed", e, generation);
             } catch (Exception e) {
-                Log.e(LOG_TAG, "SetSpeed error", e);
+                logger.error(appContext, "grpc_set_speed_error", "SetSpeed error", e);
             }
-        }).start();
+        });
     }
 
     public void setIncline(double percent) {
@@ -450,20 +504,23 @@ public class GrpcControlService {
             return;
         }
 
-        new Thread(() -> {
+        long generation = activeGeneration;
+        callbackExecutor.execute(() -> {
             try {
+                if (generation != activeGeneration || !connected || inclineStub == null) {
+                    return;
+                }
                 SetInclineRequest req = SetInclineRequest.newBuilder().setPercent(percent).build();
                 Result result = inclineStub
                         .withDeadlineAfter(3, TimeUnit.SECONDS)
                         .setIncline(req);
-                Log.i(LOG_TAG, "SetIncline(" + percent + "%) -> success=" + result.getSuccess());
+                logger.info(appContext, "grpc_set_incline", "SetIncline(" + percent + "%) -> success=" + result.getSuccess());
             } catch (StatusRuntimeException e) {
-                Log.e(LOG_TAG, "SetIncline failed: " + e.getStatus(), e);
-                handleGrpcFailure("set_incline", e);
+                handleCommandFailure("set_incline", "grpc_set_incline_failed", "SetIncline failed", e, generation);
             } catch (Exception e) {
-                Log.e(LOG_TAG, "SetIncline error", e);
+                logger.error(appContext, "grpc_set_incline_error", "SetIncline error", e);
             }
-        }).start();
+        });
     }
 
     public void setResistance(double resistance) {
@@ -471,20 +528,23 @@ public class GrpcControlService {
             return;
         }
 
-        new Thread(() -> {
+        long generation = activeGeneration;
+        callbackExecutor.execute(() -> {
             try {
+                if (generation != activeGeneration || !connected || resistanceStub == null) {
+                    return;
+                }
                 SetResistanceRequest req = SetResistanceRequest.newBuilder().setResistance(resistance).build();
                 Result result = resistanceStub
                         .withDeadlineAfter(3, TimeUnit.SECONDS)
                         .setResistance(req);
-                Log.i(LOG_TAG, "SetResistance(" + resistance + ") -> success=" + result.getSuccess());
+                logger.info(appContext, "grpc_set_resistance", "SetResistance(" + resistance + ") -> success=" + result.getSuccess());
             } catch (StatusRuntimeException e) {
-                Log.e(LOG_TAG, "SetResistance failed: " + e.getStatus(), e);
-                handleGrpcFailure("set_resistance", e);
+                handleCommandFailure("set_resistance", "grpc_set_resistance_failed", "SetResistance failed", e, generation);
             } catch (Exception e) {
-                Log.e(LOG_TAG, "SetResistance error", e);
+                logger.error(appContext, "grpc_set_resistance_error", "SetResistance error", e);
             }
-        }).start();
+        });
     }
 
     // --- Data Subscriptions ---
@@ -494,11 +554,12 @@ public class GrpcControlService {
             return;
         }
 
-        Log.i(LOG_TAG, "Starting gRPC data subscriptions");
-        subscribeConsoleInfo();
-        subscribeSpeed();
-        subscribeIncline();
-        subscribeDistance();
+        long generation = activeGeneration;
+        logger.info(appContext, "grpc_start_subscriptions", "Starting gRPC data subscriptions");
+        subscribeConsoleInfo(generation);
+        subscribeSpeed(generation);
+        subscribeIncline(generation);
+        subscribeDistance(generation);
         startEquipmentSpecificSubscriptionsIfNeeded();
     }
 
@@ -509,14 +570,15 @@ public class GrpcControlService {
 
         if (isBikeDevice() || isElliptical()) {
             advancedSubscriptionsStarted = true;
-            Log.i(LOG_TAG, "Starting resistance/cadence/watts subscriptions for " + machineType);
-            subscribeResistance();
-            subscribeCadence();
-            subscribeWatts();
+            long generation = activeGeneration;
+            logger.info(appContext, "grpc_start_advanced_subscriptions", "Starting resistance/cadence/watts subscriptions for " + machineType);
+            subscribeResistance(generation);
+            subscribeCadence(generation);
+            subscribeWatts(generation);
         }
     }
 
-    private void subscribeSpeed() {
+    private void subscribeSpeed(long generation) {
         if (!connected || speedAsyncStub == null) {
             return;
         }
@@ -525,24 +587,30 @@ public class GrpcControlService {
             @Override
             public void onNext(SpeedData data) {
                 lastSpeedKph = data.getLastKph();
+                cachedSpeedKph = lastSpeedKph;
             }
 
             @Override
             public void onError(Throwable t) {
-                Log.e(LOG_TAG, "Speed subscription error", t);
-                if (!handleGrpcFailure("speed_subscription", t)) {
-                    retrySubscription(GrpcControlService.this::subscribeSpeed, 3000);
-                }
+                handleSubscriptionError(
+                        "speed_subscription",
+                        "speed_subscription_error",
+                        "Speed subscription error",
+                        t,
+                        generation,
+                        () -> subscribeSpeed(generation),
+                        3000
+                );
             }
 
             @Override
             public void onCompleted() {
-                Log.i(LOG_TAG, "Speed subscription completed");
+                logger.info(appContext, "speed_subscription_completed", "Speed subscription completed");
             }
         });
     }
 
-    private void subscribeIncline() {
+    private void subscribeIncline(long generation) {
         if (!connected || inclineAsyncStub == null) {
             return;
         }
@@ -551,24 +619,30 @@ public class GrpcControlService {
             @Override
             public void onNext(InclineData data) {
                 lastInclinePercent = data.getLastInclinePercent();
+                cachedInclinePercent = lastInclinePercent;
             }
 
             @Override
             public void onError(Throwable t) {
-                Log.e(LOG_TAG, "Incline subscription error", t);
-                if (!handleGrpcFailure("incline_subscription", t)) {
-                    retrySubscription(GrpcControlService.this::subscribeIncline, 3000);
-                }
+                handleSubscriptionError(
+                        "incline_subscription",
+                        "incline_subscription_error",
+                        "Incline subscription error",
+                        t,
+                        generation,
+                        () -> subscribeIncline(generation),
+                        3000
+                );
             }
 
             @Override
             public void onCompleted() {
-                Log.i(LOG_TAG, "Incline subscription completed");
+                logger.info(appContext, "incline_subscription_completed", "Incline subscription completed");
             }
         });
     }
 
-    private void subscribeDistance() {
+    private void subscribeDistance(long generation) {
         if (!connected || distanceAsyncStub == null) {
             return;
         }
@@ -577,25 +651,32 @@ public class GrpcControlService {
             @Override
             public void onNext(DistanceData data) {
                 lastDistanceKm = data.getLastDistanceKm();
-                Log.d(LOG_TAG, "Distance: " + lastDistanceKm + " km (" + (int) (lastDistanceKm * 1000) + " m)");
+                cachedDistanceKm = lastDistanceKm;
+                logger.debug(appContext, "distance_subscription_update",
+                        "Distance: " + lastDistanceKm + " km (" + (int) (lastDistanceKm * 1000) + " m)");
             }
 
             @Override
             public void onError(Throwable t) {
-                Log.e(LOG_TAG, "Distance subscription error", t);
-                if (!handleGrpcFailure("distance_subscription", t)) {
-                    retrySubscription(GrpcControlService.this::subscribeDistance, 3000);
-                }
+                handleSubscriptionError(
+                        "distance_subscription",
+                        "distance_subscription_error",
+                        "Distance subscription error",
+                        t,
+                        generation,
+                        () -> subscribeDistance(generation),
+                        3000
+                );
             }
 
             @Override
             public void onCompleted() {
-                Log.i(LOG_TAG, "Distance subscription completed");
+                logger.info(appContext, "distance_subscription_completed", "Distance subscription completed");
             }
         });
     }
 
-    private void subscribeResistance() {
+    private void subscribeResistance(long generation) {
         if (!connected || resistanceAsyncStub == null) {
             return;
         }
@@ -604,24 +685,30 @@ public class GrpcControlService {
             @Override
             public void onNext(ResistanceData data) {
                 lastResistance = data.getLastResistance();
+                cachedResistance = lastResistance;
             }
 
             @Override
             public void onError(Throwable t) {
-                Log.e(LOG_TAG, "Resistance subscription error", t);
-                if (!handleGrpcFailure("resistance_subscription", t)) {
-                    retrySubscription(GrpcControlService.this::subscribeResistance, 3000);
-                }
+                handleSubscriptionError(
+                        "resistance_subscription",
+                        "resistance_subscription_error",
+                        "Resistance subscription error",
+                        t,
+                        generation,
+                        () -> subscribeResistance(generation),
+                        3000
+                );
             }
 
             @Override
             public void onCompleted() {
-                Log.i(LOG_TAG, "Resistance subscription completed");
+                logger.info(appContext, "resistance_subscription_completed", "Resistance subscription completed");
             }
         });
     }
 
-    private void subscribeCadence() {
+    private void subscribeCadence(long generation) {
         if (!connected || cadenceAsyncStub == null) {
             return;
         }
@@ -630,24 +717,30 @@ public class GrpcControlService {
             @Override
             public void onNext(CadenceData data) {
                 lastCadenceRpm = data.getLastRpm();
+                cachedCadenceRpm = lastCadenceRpm;
             }
 
             @Override
             public void onError(Throwable t) {
-                Log.e(LOG_TAG, "Cadence subscription error", t);
-                if (!handleGrpcFailure("cadence_subscription", t)) {
-                    retrySubscription(GrpcControlService.this::subscribeCadence, 3000);
-                }
+                handleSubscriptionError(
+                        "cadence_subscription",
+                        "cadence_subscription_error",
+                        "Cadence subscription error",
+                        t,
+                        generation,
+                        () -> subscribeCadence(generation),
+                        3000
+                );
             }
 
             @Override
             public void onCompleted() {
-                Log.i(LOG_TAG, "Cadence subscription completed");
+                logger.info(appContext, "cadence_subscription_completed", "Cadence subscription completed");
             }
         });
     }
 
-    private void subscribeWatts() {
+    private void subscribeWatts(long generation) {
         if (!connected || wattsAsyncStub == null) {
             return;
         }
@@ -656,95 +749,126 @@ public class GrpcControlService {
             @Override
             public void onNext(WattsData data) {
                 lastWatts = data.getLastWatts();
+                cachedWatts = lastWatts;
             }
 
             @Override
             public void onError(Throwable t) {
-                Log.e(LOG_TAG, "Watts subscription error", t);
-                if (!handleGrpcFailure("watts_subscription", t)) {
-                    retrySubscription(GrpcControlService.this::subscribeWatts, 3000);
-                }
+                handleSubscriptionError(
+                        "watts_subscription",
+                        "watts_subscription_error",
+                        "Watts subscription error",
+                        t,
+                        generation,
+                        () -> subscribeWatts(generation),
+                        3000
+                );
             }
 
             @Override
             public void onCompleted() {
-                Log.i(LOG_TAG, "Watts subscription completed");
+                logger.info(appContext, "watts_subscription_completed", "Watts subscription completed");
             }
         });
     }
 
-    private void retrySubscription(Runnable subscription, long delayMs) {
-        if (!connected) {
+    private void retrySubscription(Runnable subscription, long delayMs, long generation) {
+        if (!connected || generation != activeGeneration) {
             return;
         }
 
-        new Thread(() -> {
-            try {
-                Thread.sleep(delayMs);
-                if (connected) {
-                    subscription.run();
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+        callbackExecutor.schedule(() -> {
+            if (connected && generation == activeGeneration) {
+                subscription.run();
             }
-        }).start();
+        }, delayMs, TimeUnit.MILLISECONDS);
     }
 
-    private void retryConsoleInfoSubscription(long delayMs) {
-        if (channel == null) {
+    private void retryConsoleInfoSubscription(long delayMs, long generation) {
+        if (channel == null || generation != activeGeneration) {
             return;
         }
 
-        new Thread(() -> {
-            try {
-                Thread.sleep(delayMs);
-                if (channel != null) {
-                    subscribeConsoleInfo();
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+        callbackExecutor.schedule(() -> {
+            if (channel != null && generation == activeGeneration) {
+                subscribeConsoleInfo(generation);
             }
-        }).start();
+        }, delayMs, TimeUnit.MILLISECONDS);
+    }
+
+    private void handleCommandFailure(
+            String source,
+            String eventName,
+            String message,
+            StatusRuntimeException error,
+            long generation
+    ) {
+        if (handleGrpcFailure(source, error, generation)) {
+            return;
+        }
+        logger.warn(appContext, eventName, message + ": " + summarizeTransportError(error), error);
+    }
+
+    private void handleSubscriptionError(
+            String source,
+            String eventName,
+            String message,
+            Throwable error,
+            long generation,
+            Runnable retryAction,
+            long retryDelayMs
+    ) {
+        if (handleGrpcFailure(source, error, generation)) {
+            return;
+        }
+        logger.warn(appContext, eventName, message + ": " + summarizeTransportError(error), error);
+        retrySubscription(retryAction, retryDelayMs, generation);
     }
 
     // --- Getters for latest values ---
 
-    public double getLastSpeedKph() { return lastSpeedKph; }
+    public double getLastSpeedKph() { return connected ? lastSpeedKph : cachedSpeedKph; }
 
-    public double getLastInclinePercent() { return lastInclinePercent; }
+    public double getLastInclinePercent() { return connected ? lastInclinePercent : cachedInclinePercent; }
 
-    public double getLastDistanceKm() { return lastDistanceKm; }
+    public double getLastDistanceKm() { return connected ? lastDistanceKm : cachedDistanceKm; }
 
-    public double getLastResistance() { return lastResistance; }
+    public double getLastResistance() { return connected ? lastResistance : cachedResistance; }
 
-    public double getLastCadenceRpm() { return lastCadenceRpm; }
+    public double getLastCadenceRpm() { return connected ? lastCadenceRpm : cachedCadenceRpm; }
 
-    public double getLastWatts() { return lastWatts; }
+    public double getLastWatts() { return connected ? lastWatts : cachedWatts; }
 
     // --- Supported Ranges (from ConsoleInfo) ---
 
     public double getMinSpeedKph() {
-        return consoleInfo != null ? consoleInfo.getMinKph() : 0.5;
+        ConsoleInfo info = getConsoleInfo();
+        return info != null ? info.getMinKph() : 0.5;
     }
 
     public double getMaxSpeedKph() {
-        return consoleInfo != null ? consoleInfo.getMaxKph() : 22.0;
+        ConsoleInfo info = getConsoleInfo();
+        return info != null ? info.getMaxKph() : 22.0;
     }
 
     public double getMinInclinePercent() {
-        return consoleInfo != null ? consoleInfo.getMinInclinePercent() : -6.0;
+        ConsoleInfo info = getConsoleInfo();
+        return info != null ? info.getMinInclinePercent() : -6.0;
     }
 
     public double getMaxInclinePercent() {
-        return consoleInfo != null ? consoleInfo.getMaxInclinePercent() : 40.0;
+        ConsoleInfo info = getConsoleInfo();
+        return info != null ? info.getMaxInclinePercent() : 40.0;
     }
 
     public double getMinResistance() {
-        return consoleInfo != null ? consoleInfo.getMinResistance() : 0;
+        ConsoleInfo info = getConsoleInfo();
+        return info != null ? info.getMinResistance() : 0;
     }
 
     public double getMaxResistance() {
-        return consoleInfo != null ? consoleInfo.getMaxResistance() : 30;
+        ConsoleInfo info = getConsoleInfo();
+        return info != null ? info.getMaxResistance() : 30;
     }
 
     private SSLSocketFactory createSslSocketFactory() throws Exception {
@@ -778,7 +902,7 @@ public class GrpcControlService {
         SSLContext sslContext = SSLContext.getInstance("TLS");
         sslContext.init(kmf.getKeyManagers(), tmf.getTrustManagers(), null);
 
-        Log.i(LOG_TAG, "SSL context created with mTLS (client CN: " + clientCert.getSubjectDN() + ")");
+        logger.info(appContext, "grpc_ssl_ready", "SSL context created with mTLS (client CN: " + clientCert.getSubjectDN() + ")");
         return sslContext.getSocketFactory();
     }
 
@@ -803,8 +927,20 @@ public class GrpcControlService {
         return buffer.toByteArray();
     }
 
-    private synchronized boolean handleGrpcFailure(String source, Throwable error) {
-        if (!isBackendUnavailable(error)) {
+    static boolean shouldSuppressChannelShutdownNoise(
+            boolean localDisconnectInProgress,
+            boolean generationMatches,
+            Throwable error
+    ) {
+        return !generationMatches || (localDisconnectInProgress && isChannelShutdownSignal(error));
+    }
+
+    private synchronized boolean handleGrpcFailure(String source, Throwable error, long generation) {
+        if (shouldSuppressChannelShutdownNoise(disconnectReason != DisconnectReason.NONE, generation == activeGeneration, error)) {
+            logger.debug(appContext, "grpc_shutdown_noise", "Ignoring callback from a local or stale channel shutdown for " + source);
+            return true;
+        }
+        if (!isBackendUnavailableSignal(error)) {
             return false;
         }
 
@@ -816,8 +952,8 @@ public class GrpcControlService {
         }
 
         boolean shouldNotify = backendUnavailableReported.compareAndSet(false, true);
-        Log.w(LOG_TAG, "GlassOS backend became unavailable via " + source, error);
-        disconnectInternal(false);
+        logger.warn(appContext, "grpc_backend_unavailable", "GlassOS backend became unavailable via " + source, error);
+        disconnectInternal(false, DisconnectReason.BACKEND_FAILURE);
 
         if (shouldNotify && backendUnavailableListener != null) {
             backendUnavailableListener.onGrpcBackendUnavailable(source, error);
@@ -825,12 +961,17 @@ public class GrpcControlService {
         return true;
     }
 
-    private boolean isBackendUnavailable(Throwable error) {
+    static boolean isBackendUnavailableSignal(Throwable error) {
         Throwable current = error;
         while (current != null) {
             if (current instanceof StatusRuntimeException) {
-                Status.Code statusCode = ((StatusRuntimeException) current).getStatus().getCode();
+                StatusRuntimeException statusError = (StatusRuntimeException) current;
+                Status.Code statusCode = statusError.getStatus().getCode();
+                String description = statusError.getStatus().getDescription();
                 if (statusCode == Status.Code.UNAVAILABLE || statusCode == Status.Code.DEADLINE_EXCEEDED) {
+                    return true;
+                }
+                if (statusCode == Status.Code.RESOURCE_EXHAUSTED && isKeepAliveThrottleMessage(description)) {
                     return true;
                 }
             }
@@ -843,7 +984,8 @@ public class GrpcControlService {
             if (message != null && (message.contains("ECONNREFUSED")
                     || message.contains("Connection refused")
                     || message.contains("failed to connect to localhost")
-                    || message.contains("UNAVAILABLE"))) {
+                    || message.contains("UNAVAILABLE")
+                    || isKeepAliveThrottleMessage(message))) {
                 return true;
             }
 
@@ -853,16 +995,63 @@ public class GrpcControlService {
         return false;
     }
 
+    private static boolean isKeepAliveThrottleMessage(String message) {
+        return message != null && (message.contains("too_many_pings")
+                || message.contains("ENHANCE_YOUR_CALM")
+                || message.contains("Bandwidth exhausted"));
+    }
+
+    private static String summarizeTransportError(Throwable error) {
+        if (error instanceof StatusRuntimeException) {
+            Status status = ((StatusRuntimeException) error).getStatus();
+            if (status.getDescription() == null || status.getDescription().isEmpty()) {
+                return status.getCode().name();
+            }
+            return status.getCode().name() + ": " + status.getDescription();
+        }
+
+        String message = error != null ? error.getMessage() : null;
+        if (message != null && !message.isEmpty()) {
+            return message;
+        }
+        return error != null ? error.getClass().getSimpleName() : "unknown error";
+    }
+
+    private static boolean isChannelShutdownSignal(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            if (current instanceof StatusRuntimeException) {
+                String message = ((StatusRuntimeException) current).getStatus().getDescription();
+                if (message != null && (message.contains("Channel shutdownNow invoked")
+                        || message.contains("Channel shutdown invoked")
+                        || message.contains("End of stream"))) {
+                    return true;
+                }
+            }
+
+            String message = current.getMessage();
+            if (message != null && (message.contains("Channel shutdownNow invoked")
+                    || message.contains("Channel shutdown invoked")
+                    || message.contains("End of stream or IOException"))) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
     private void resetConnectionErrors() {
         lastConsoleInfoFetchError = null;
         lastConsoleInfoFetchErrorSource = "unknown";
         lastConnectionError = null;
         lastConnectionErrorSource = "unknown";
         backendUnavailableReported.set(false);
+        disconnectReason = DisconnectReason.NONE;
     }
 
-    private void disconnectInternal(boolean log) {
+    private void disconnectInternal(boolean log, DisconnectReason reason) {
         ManagedChannel channelToClose = channel;
+        disconnectReason = reason;
 
         channel = null;
         speedStub = null;
@@ -893,15 +1082,19 @@ public class GrpcControlService {
 
         if (channelToClose != null) {
             try {
-                channelToClose.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
+                channelToClose.shutdown();
+                if (!channelToClose.awaitTermination(1500, TimeUnit.MILLISECONDS)) {
+                    channelToClose.shutdownNow();
+                    channelToClose.awaitTermination(3500, TimeUnit.MILLISECONDS);
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                Log.e(LOG_TAG, "Error shutting down gRPC channel", e);
+                logger.error(appContext, "grpc_shutdown_error", "Error shutting down the gRPC channel", e);
             }
         }
 
         if (log) {
-            Log.i(LOG_TAG, "gRPC channel disconnected");
+            logger.info(appContext, "grpc_disconnected", "gRPC channel disconnected");
         }
     }
 }
