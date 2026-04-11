@@ -282,6 +282,14 @@ public class DirconServer {
 
         if (notificationScheduler != null) {
             notificationScheduler.shutdown();
+            try {
+                if (!notificationScheduler.awaitTermination(2, TimeUnit.SECONDS)) {
+                    notificationScheduler.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                notificationScheduler.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
         }
 
         stopMdns();
@@ -312,6 +320,7 @@ public class DirconServer {
                 Log.i(LOG_TAG, "Client connected: " + socket.getRemoteSocketAddress());
 
                 try {
+                    socket.setSoTimeout(30_000);
                     ClientState client = new ClientState(socket);
                     clients.put(socket, client);
                     Log.i(LOG_TAG, "=== NEW TCP CONNECTION from " + socket.getRemoteSocketAddress()
@@ -1541,21 +1550,29 @@ public class DirconServer {
             multicastLock.setReferenceCounted(false);
             multicastLock.acquire();
 
-            // Get device IP address
-            int ipInt = wifiManager.getConnectionInfo().getIpAddress();
-            byte[] ipBytes = new byte[]{
-                    (byte) (ipInt & 0xFF),
-                    (byte) ((ipInt >> 8) & 0xFF),
-                    (byte) ((ipInt >> 16) & 0xFF),
-                    (byte) ((ipInt >> 24) & 0xFF)
-            };
-            InetAddress address = InetAddress.getByAddress(ipBytes);
+            try {
+                // Get device IP address
+                int ipInt = wifiManager.getConnectionInfo().getIpAddress();
+                byte[] ipBytes = new byte[]{
+                        (byte) (ipInt & 0xFF),
+                        (byte) ((ipInt >> 8) & 0xFF),
+                        (byte) ((ipInt >> 16) & 0xFF),
+                        (byte) ((ipInt >> 24) & 0xFF)
+                };
+                InetAddress address = InetAddress.getByAddress(ipBytes);
 
-            Log.i(LOG_TAG, "Starting mDNS on " + address.getHostAddress());
+                Log.i(LOG_TAG, "Starting mDNS on " + address.getHostAddress());
 
-            synchronized (mdnsLock) {
-                jmdns = JmDNS.create(address, "NordicFTMS");
-                registerMdnsService(wifiManager);
+                synchronized (mdnsLock) {
+                    jmdns = JmDNS.create(address, "NordicFTMS");
+                    registerMdnsService(wifiManager);
+                }
+            } catch (Exception e) {
+                if (multicastLock.isHeld()) {
+                    multicastLock.release();
+                }
+                multicastLock = null;
+                throw e;
             }
 
         } catch (Exception e) {

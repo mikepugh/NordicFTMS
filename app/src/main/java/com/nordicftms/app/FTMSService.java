@@ -18,8 +18,10 @@ import android.bluetooth.le.AdvertiseCallback;
 import android.bluetooth.le.AdvertiseData;
 import android.bluetooth.le.AdvertiseSettings;
 import android.bluetooth.le.BluetoothLeAdvertiser;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -31,9 +33,9 @@ import android.util.Log;
 import androidx.core.app.NotificationCompat;
 
 import java.util.Arrays;
-import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -84,7 +86,7 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
             COMMAND_INTENT_RETENTION_MS,
             MAX_PENDING_INCLINE_TARGETS
     );
-    private final Set<BluetoothDevice> subscribedDevices = new HashSet<>();
+    private final Set<BluetoothDevice> subscribedDevices = new CopyOnWriteArraySet<>();
     private final Object startupLock = new Object();
 
     private BluetoothManager bluetoothManager;
@@ -110,6 +112,7 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
 
     private GrpcControlService grpc;
     private DirconServer dirconServer;
+    private BroadcastReceiver bluetoothStateReceiver;
     private final NordicFtmsLogger logger = NordicFtmsLogger.getInstance();
 
     private BluetoothGattCharacteristic treadmillDataCharacteristic;
@@ -137,6 +140,7 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
                 : ServiceStatusSnapshot.BleState.WAITING_FOR_PERMISSION;
         backendState = ServiceStatusSnapshot.BackendState.DISCONNECTED;
 
+        registerBluetoothStateReceiver();
         startForegroundNotification();
         refreshStatusSnapshot();
 
@@ -196,8 +200,12 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
         logger.info(this, "service_destroy", "FTMSService destroyed");
         destroyed = true;
 
-        if (startupExecutor != null) {
-            startupExecutor.shutdownNow();
+        unregisterBluetoothStateReceiver();
+
+        synchronized (startupLock) {
+            if (startupExecutor != null) {
+                startupExecutor.shutdownNow();
+            }
         }
 
         stopRuntimeComponents();
@@ -597,6 +605,45 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
             handler.post(this::startRuntimeComponents);
         } else {
             forceBackendRetry(source);
+        }
+    }
+
+    // --- Bluetooth Adapter State ---
+
+    private void registerBluetoothStateReceiver() {
+        bluetoothStateReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (!BluetoothAdapter.ACTION_STATE_CHANGED.equals(intent.getAction())) return;
+                int state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR);
+                if (state == BluetoothAdapter.STATE_OFF) {
+                    logger.warn(FTMSService.this, "bluetooth_adapter_off",
+                            "Bluetooth adapter turned off; tearing down BLE components");
+                    stopRuntimeComponents();
+                } else if (state == BluetoothAdapter.STATE_ON) {
+                    logger.info(FTMSService.this, "bluetooth_adapter_on",
+                            "Bluetooth adapter turned on; restarting");
+                    if (BluetoothPermissionGate.hasRequiredPermissions(FTMSService.this)) {
+                        if (grpc != null && grpc.isConnected()) {
+                            handler.post(() -> startRuntimeComponents());
+                        } else {
+                            forceBackendRetry("bluetooth_adapter_on");
+                        }
+                    }
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED);
+        registerReceiver(bluetoothStateReceiver, filter);
+    }
+
+    private void unregisterBluetoothStateReceiver() {
+        if (bluetoothStateReceiver != null) {
+            try {
+                unregisterReceiver(bluetoothStateReceiver);
+            } catch (IllegalArgumentException ignored) {
+            }
+            bluetoothStateReceiver = null;
         }
     }
 
@@ -1163,22 +1210,23 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
             return;
         }
 
-        if (gattServer == null || subscribedDevices.isEmpty() || grpc == null || !grpc.isConnected()) {
+        GrpcControlService g = grpc;
+        if (gattServer == null || subscribedDevices.isEmpty() || g == null || !g.isConnected()) {
             return;
         }
 
-        checkForManualInclineChange();
+        checkForManualInclineChange(g);
 
-        boolean isBike = grpc.isBikeDevice();
+        boolean isBike = g.isBikeDevice();
 
-        for (BluetoothDevice device : new HashSet<>(subscribedDevices)) {
+        for (BluetoothDevice device : subscribedDevices) {
             try {
                 if (isBike) {
-                    byte[] bikeData = buildIndoorBikeData();
+                    byte[] bikeData = buildIndoorBikeData(g);
                     indoorBikeDataCharacteristic.setValue(bikeData);
                     notifyCharacteristicChangedSafely(device, indoorBikeDataCharacteristic, false);
                 } else {
-                    byte[] treadmillData = buildTreadmillData();
+                    byte[] treadmillData = buildTreadmillData(g);
                     treadmillDataCharacteristic.setValue(treadmillData);
                     notifyCharacteristicChangedSafely(device, treadmillDataCharacteristic, false);
                 }
@@ -1188,8 +1236,8 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
         }
     }
 
-    private void checkForManualInclineChange() {
-        double currentIncline = grpc.getLastInclinePercent();
+    private void checkForManualInclineChange(GrpcControlService g) {
+        double currentIncline = g.getLastInclinePercent();
         InclineCommandTracker.ChangeResult changeResult = inclineCommandTracker.updateObservedIncline(
                 currentIncline,
                 System.currentTimeMillis()
@@ -1205,7 +1253,7 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
 
         logger.info(this, "manual_incline_detected", "Manual incline change detected: " + currentIncline + "%");
 
-        for (BluetoothDevice device : new HashSet<>(subscribedDevices)) {
+        for (BluetoothDevice device : subscribedDevices) {
             try {
                 machineStatusCharacteristic.setValue(status);
                 notifyCharacteristicChangedSafely(device, machineStatusCharacteristic, false);
@@ -1221,18 +1269,18 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
 
     // --- Data Builders ---
 
-    private byte[] buildTreadmillData() {
+    private byte[] buildTreadmillData(GrpcControlService g) {
         byte[] data = new byte[11];
 
         writeUint16LE(data, 0, 0x000C);
 
-        int speed = (int) (grpc.getLastSpeedKph() * 100);
+        int speed = (int) (g.getLastSpeedKph() * 100);
         if (speed < 0) {
             speed = 0;
         }
         writeUint16LE(data, 2, speed);
 
-        int distMeters = (int) (grpc.getLastDistanceKm() * 1000);
+        int distMeters = (int) (g.getLastDistanceKm() * 1000);
         if (distMeters < 0) {
             distMeters = 0;
         }
@@ -1240,31 +1288,31 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
         data[5] = (byte) ((distMeters >> 8) & 0xFF);
         data[6] = (byte) ((distMeters >> 16) & 0xFF);
 
-        int inclination = (int) (grpc.getLastInclinePercent() * 10);
+        int inclination = (int) (g.getLastInclinePercent() * 10);
         writeInt16LE(data, 7, inclination);
         writeInt16LE(data, 9, 0);
 
         return data;
     }
 
-    private byte[] buildIndoorBikeData() {
+    private byte[] buildIndoorBikeData(GrpcControlService g) {
         byte[] data = new byte[10];
 
         writeUint16LE(data, 0, 0x0064);
 
-        int speed = (int) (grpc.getLastSpeedKph() * 100);
+        int speed = (int) (g.getLastSpeedKph() * 100);
         if (speed < 0) {
             speed = 0;
         }
         writeUint16LE(data, 2, speed);
 
-        int cadence = (int) (grpc.getLastCadenceRpm() * 2);
+        int cadence = (int) (g.getLastCadenceRpm() * 2);
         writeUint16LE(data, 4, cadence);
 
-        int resistance = (int) (grpc.getLastResistance() * 10);
+        int resistance = (int) (g.getLastResistance() * 10);
         writeInt16LE(data, 6, resistance);
 
-        int power = (int) grpc.getLastWatts();
+        int power = (int) g.getLastWatts();
         writeInt16LE(data, 8, power);
 
         return data;

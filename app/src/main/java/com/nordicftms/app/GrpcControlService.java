@@ -822,7 +822,27 @@ public class GrpcControlService {
             return;
         }
         logger.warn(appContext, eventName, message + ": " + summarizeTransportError(error), error);
+        if (isNonTransientError(error)) {
+            logger.error(appContext, eventName + "_permanent",
+                    "Not retrying " + source + " — error is non-transient", error);
+            return;
+        }
         retrySubscription(retryAction, retryDelayMs, generation);
+    }
+
+    private static boolean isNonTransientError(Throwable error) {
+        for (Throwable t = error; t != null; t = t.getCause()) {
+            if (t instanceof StatusRuntimeException) {
+                Status.Code code = ((StatusRuntimeException) t).getStatus().getCode();
+                if (code == Status.Code.PERMISSION_DENIED
+                        || code == Status.Code.UNAUTHENTICATED
+                        || code == Status.Code.UNIMPLEMENTED
+                        || code == Status.Code.INVALID_ARGUMENT) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // --- Getters for latest values ---
@@ -1050,6 +1070,10 @@ public class GrpcControlService {
     }
 
     private void disconnectInternal(boolean log, DisconnectReason reason) {
+        // Invalidate the generation first so in-flight stream callbacks bail out
+        // before we null the stubs they reference.
+        generationCounter.incrementAndGet();
+
         ManagedChannel channelToClose = channel;
         disconnectReason = reason;
 
