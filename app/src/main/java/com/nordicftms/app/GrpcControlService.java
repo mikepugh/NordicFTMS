@@ -5,6 +5,7 @@ import com.ifit.glassos.CadenceData;
 import com.ifit.glassos.CadenceServiceGrpc;
 import com.ifit.glassos.ConsoleInfo;
 import com.ifit.glassos.ConsoleServiceGrpc;
+import com.ifit.glassos.ConsoleStateResponse;
 import com.ifit.glassos.ConsoleType;
 import com.ifit.glassos.DistanceData;
 import com.ifit.glassos.DistanceServiceGrpc;
@@ -22,6 +23,7 @@ import com.ifit.glassos.SpeedServiceGrpc;
 import com.ifit.glassos.WattsData;
 import com.ifit.glassos.WattsServiceGrpc;
 import com.ifit.glassos.WorkoutServiceGrpc;
+import com.ifit.glassos.WorkoutStateResponse;
 
 import java.io.InputStream;
 import java.net.ConnectException;
@@ -511,10 +513,16 @@ public class GrpcControlService {
                     return;
                 }
                 SetInclineRequest req = SetInclineRequest.newBuilder().setPercent(percent).build();
+                long sentAtMs = android.os.SystemClock.elapsedRealtime();
                 Result result = inclineStub
                         .withDeadlineAfter(3, TimeUnit.SECONDS)
                         .setIncline(req);
+                long rttMs = android.os.SystemClock.elapsedRealtime() - sentAtMs;
                 logger.info(appContext, "grpc_set_incline", "SetIncline(" + percent + "%) -> success=" + result.getSuccess());
+                logger.trace(appContext, "grpc_set_incline_rtt",
+                        String.format(java.util.Locale.US,
+                                "percent=%.2f%% success=%s rttMs=%d",
+                                percent, result.getSuccess(), rttMs));
             } catch (StatusRuntimeException e) {
                 handleCommandFailure("set_incline", "grpc_set_incline_failed", "SetIncline failed", e, generation);
             } catch (Exception e) {
@@ -561,6 +569,15 @@ public class GrpcControlService {
         subscribeIncline(generation);
         subscribeDistance(generation);
         startEquipmentSpecificSubscriptionsIfNeeded();
+
+        // Opt-in diagnostic streams — used to investigate whether ConsoleState or
+        // WorkoutState transitions correlate with hardware button presses. Gated
+        // behind detailed tracing so production sessions don't hold extra server
+        // streams open. Remove the gate once we confirm no side effects.
+        if (NordicFtmsPreferences.isDetailedTracingEnabled(appContext)) {
+            subscribeConsoleState(generation);
+            subscribeWorkoutState(generation);
+        }
     }
 
     private synchronized void startEquipmentSpecificSubscriptionsIfNeeded() {
@@ -576,6 +593,70 @@ public class GrpcControlService {
             subscribeCadence(generation);
             subscribeWatts(generation);
         }
+    }
+
+    private void subscribeConsoleState(long generation) {
+        if (!connected || consoleAsyncStub == null) {
+            return;
+        }
+
+        consoleAsyncStub.consoleStateChanged(Empty.getDefaultInstance(), new StreamObserver<ConsoleStateResponse>() {
+            @Override
+            public void onNext(ConsoleStateResponse data) {
+                logger.trace(appContext, "console_state_changed",
+                        "consoleState=" + data.getConsoleState());
+            }
+
+            @Override
+            public void onError(Throwable t) {
+                handleSubscriptionError(
+                        "console_state_subscription",
+                        "console_state_subscription_error",
+                        "Console state subscription error",
+                        t,
+                        generation,
+                        () -> subscribeConsoleState(generation),
+                        3000
+                );
+            }
+
+            @Override
+            public void onCompleted() {
+                logger.info(appContext, "console_state_subscription_completed", "Console state subscription completed");
+            }
+        });
+    }
+
+    private void subscribeWorkoutState(long generation) {
+        if (!connected || workoutAsyncStub == null) {
+            return;
+        }
+
+        workoutAsyncStub.workoutStateChanged(Empty.getDefaultInstance(), new StreamObserver<WorkoutStateResponse>() {
+            @Override
+            public void onNext(WorkoutStateResponse data) {
+                logger.trace(appContext, "workout_state_changed",
+                        "workoutState=" + data.getWorkoutState());
+            }
+
+            @Override
+            public void onError(Throwable t) {
+                handleSubscriptionError(
+                        "workout_state_subscription",
+                        "workout_state_subscription_error",
+                        "Workout state subscription error",
+                        t,
+                        generation,
+                        () -> subscribeWorkoutState(generation),
+                        3000
+                );
+            }
+
+            @Override
+            public void onCompleted() {
+                logger.info(appContext, "workout_state_subscription_completed", "Workout state subscription completed");
+            }
+        });
     }
 
     private void subscribeSpeed(long generation) {
@@ -616,10 +697,19 @@ public class GrpcControlService {
         }
 
         inclineAsyncStub.inclineSubscription(Empty.getDefaultInstance(), new StreamObserver<InclineData>() {
+            private double priorValue = Double.NaN;
+
             @Override
             public void onNext(InclineData data) {
-                lastInclinePercent = data.getLastInclinePercent();
-                cachedInclinePercent = lastInclinePercent;
+                double value = data.getLastInclinePercent();
+                double delta = Double.isNaN(priorValue) ? 0.0 : value - priorValue;
+                priorValue = value;
+                lastInclinePercent = value;
+                cachedInclinePercent = value;
+                logger.trace(appContext, "incline_observation",
+                        String.format(java.util.Locale.US,
+                                "value=%.3f%% delta=%+.3f%% workoutId=%s timeSeconds=%d",
+                                value, delta, data.getWorkoutID(), data.getTimeSeconds()));
             }
 
             @Override

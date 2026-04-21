@@ -13,6 +13,7 @@ import io.sentry.SentryLevel;
 
 public final class NordicFtmsLogger {
     private static final String LOG_TAG = "NordicFTMS";
+    private static final String TRACE_TAG = "NordicFTMS-Trace";
     private static final long DEFAULT_SENTRY_THROTTLE_MS = 60_000L;
 
     private static final NordicFtmsLogger INSTANCE = new NordicFtmsLogger();
@@ -52,6 +53,24 @@ public final class NordicFtmsLogger {
 
     public void error(Context context, String eventName, String message, Throwable throwable, Map<String, String> tags) {
         log(context, SentryLevel.ERROR, eventName, message, throwable, tags);
+    }
+
+    /**
+     * High-frequency diagnostic trace that intentionally bypasses Sentry
+     * breadcrumbs and {@code captureMessage}. Active only when the user has
+     * enabled detailed tracing. Use for per-event detail (every incline command,
+     * every observation, every tracker decision) that would otherwise evict
+     * real crash context from Sentry's 100-entry breadcrumb buffer.
+     *
+     * <p>Output goes to Android {@code Log.i} under the "NordicFTMS-Trace" tag
+     * so it can be filtered separately: {@code adb logcat -s NordicFTMS-Trace}.
+     */
+    public void trace(Context context, String eventName, String message) {
+        Context appContext = context != null ? context.getApplicationContext() : null;
+        if (appContext == null || !NordicFtmsPreferences.isDetailedTracingEnabled(appContext)) {
+            return;
+        }
+        Log.i(TRACE_TAG, "[" + eventName + "] " + message);
     }
 
     static boolean shouldEmitNow(long lastEmittedAtMs, long nowMs, long throttleMs) {

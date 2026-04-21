@@ -77,14 +77,11 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
     private static final int NOTIFICATION_ID = 1338;
     private static final long BACKEND_REPORT_THROTTLE_MS = 60_000L;
 
-    private static final double INCLINE_TOLERANCE = 0.3;
-    private static final long COMMAND_INTENT_RETENTION_MS = 5000L;
-    private static final int MAX_PENDING_INCLINE_TARGETS = 12;
-
     private final InclineCommandTracker inclineCommandTracker = new InclineCommandTracker(
-            INCLINE_TOLERANCE,
-            COMMAND_INTENT_RETENTION_MS,
-            MAX_PENDING_INCLINE_TARGETS
+            InclineTrackerConstants.INCLINE_TOLERANCE,
+            InclineTrackerConstants.COMMAND_INTENT_RETENTION_MS,
+            InclineTrackerConstants.MAX_PENDING_INCLINE_TARGETS,
+            InclineTrackerConstants.COMMAND_COOLDOWN_MS
     );
     private final Set<BluetoothDevice> subscribedDevices = new CopyOnWriteArraySet<>();
     private final Object startupLock = new Object();
@@ -976,7 +973,14 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
     };
 
     public void setFtmsTargetIncline(double incline) {
-        inclineCommandTracker.setTargetIncline(incline, System.currentTimeMillis());
+        long nowMs = SystemClock.elapsedRealtime();
+        inclineCommandTracker.setTargetIncline(incline, nowMs);
+        logger.trace(this, "tracker_command_ftms",
+                String.format(java.util.Locale.US,
+                        "incline=%.2f%% pending=%d oldestAgeMs=%d",
+                        incline,
+                        inclineCommandTracker.getPendingCount(),
+                        inclineCommandTracker.getOldestPendingAgeMs(nowMs)));
     }
 
     // --- Control Point ---
@@ -1238,10 +1242,27 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
 
     private void checkForManualInclineChange(GrpcControlService g) {
         double currentIncline = g.getLastInclinePercent();
+        long nowMs = SystemClock.elapsedRealtime();
+        double closestPending = inclineCommandTracker.getClosestPendingValue(currentIncline);
+        double closestDelta = inclineCommandTracker.getClosestPendingDelta(currentIncline);
+        int pendingCount = inclineCommandTracker.getPendingCount();
+        long msSinceLastCmd = inclineCommandTracker.getMsSinceLastCommand(nowMs);
+
         InclineCommandTracker.ChangeResult changeResult = inclineCommandTracker.updateObservedIncline(
                 currentIncline,
-                System.currentTimeMillis()
+                nowMs
         );
+
+        logger.trace(this, "tracker_check_ftms",
+                String.format(java.util.Locale.US,
+                        "observed=%.2f%% closestPending=%.2f%% delta=%.3f%% pending=%d msSinceCmd=%d result=%s",
+                        currentIncline,
+                        closestPending,
+                        closestDelta,
+                        pendingCount,
+                        msSinceLastCmd,
+                        changeResult));
+
         if (changeResult != InclineCommandTracker.ChangeResult.MANUAL_OVERRIDE) {
             return;
         }
@@ -1251,7 +1272,10 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
         status[0] = 0x06;
         writeInt16LE(status, 1, inclRaw);
 
-        logger.info(this, "manual_incline_detected", "Manual incline change detected: " + currentIncline + "%");
+        logger.info(this, "manual_incline_detected",
+                String.format(java.util.Locale.US,
+                        "Manual incline change detected: observed=%.2f%% closestPending=%.2f%% delta=%.3f%% pending=%d msSinceCmd=%d",
+                        currentIncline, closestPending, closestDelta, pendingCount, msSinceLastCmd));
 
         for (BluetoothDevice device : subscribedDevices) {
             try {

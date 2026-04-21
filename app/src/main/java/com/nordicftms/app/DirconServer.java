@@ -2,6 +2,7 @@ package com.nordicftms.app;
 
 import android.content.Context;
 import android.net.wifi.WifiManager;
+import android.os.SystemClock;
 import android.util.Log;
 
 import java.io.ByteArrayOutputStream;
@@ -193,15 +194,13 @@ public class DirconServer {
 
     // Incline tracking for DIRCON clients (mirrors FTMSService behavior)
     private boolean controlGranted = false;
-    private static final double INCLINE_TOLERANCE = 0.3;
-    private static final long COMMAND_INTENT_RETENTION_MS = 5000L;
-    private static final int MAX_PENDING_INCLINE_TARGETS = 12;
     private static final long MANUAL_OVERRIDE_IGNORE_MS = 5000L;
     private static final long MANUAL_OVERRIDE_REASSERT_DELAY_MS = 750L;
     private final InclineCommandTracker inclineCommandTracker = new InclineCommandTracker(
-            INCLINE_TOLERANCE,
-            COMMAND_INTENT_RETENTION_MS,
-            MAX_PENDING_INCLINE_TARGETS
+            InclineTrackerConstants.INCLINE_TOLERANCE,
+            InclineTrackerConstants.COMMAND_INTENT_RETENTION_MS,
+            InclineTrackerConstants.MAX_PENDING_INCLINE_TARGETS,
+            InclineTrackerConstants.COMMAND_COOLDOWN_MS
     );
     private volatile boolean manualOverrideStatusActive = false;
     private volatile long manualOverrideIgnoreUntilMs = 0L;
@@ -1179,10 +1178,27 @@ public class DirconServer {
     private void checkForManualInclineChange() {
         if (grpc == null) return;
         double currentIncline = grpc.getLastInclinePercent();
+        long nowMs = SystemClock.elapsedRealtime();
+        double closestPending = inclineCommandTracker.getClosestPendingValue(currentIncline);
+        double closestDelta = inclineCommandTracker.getClosestPendingDelta(currentIncline);
+        int pendingCount = inclineCommandTracker.getPendingCount();
+        long msSinceLastCmd = inclineCommandTracker.getMsSinceLastCommand(nowMs);
+
         InclineCommandTracker.ChangeResult changeResult = inclineCommandTracker.updateObservedIncline(
                 currentIncline,
-                System.currentTimeMillis()
+                nowMs
         );
+
+        NordicFtmsLogger.getInstance().trace(context, "tracker_check_dircon",
+                String.format(java.util.Locale.US,
+                        "observed=%.2f%% closestPending=%.2f%% delta=%.3f%% pending=%d msSinceCmd=%d result=%s",
+                        currentIncline,
+                        closestPending,
+                        closestDelta,
+                        pendingCount,
+                        msSinceLastCmd,
+                        changeResult));
+
         if (changeResult != InclineCommandTracker.ChangeResult.MANUAL_OVERRIDE) {
             return;
         }
@@ -1194,7 +1210,9 @@ public class DirconServer {
         status[1] = (byte) (inclRaw & 0xFF);
         status[2] = (byte) ((inclRaw >> 8) & 0xFF);
 
-        Log.i(LOG_TAG, "Manual incline change: " + currentIncline + "% — sending Machine Status");
+        Log.i(LOG_TAG, String.format(java.util.Locale.US,
+                "Manual incline change: observed=%.2f%% closestPending=%.2f%% delta=%.3f%% pending=%d msSinceCmd=%d — sending Machine Status",
+                currentIncline, closestPending, closestDelta, pendingCount, msSinceLastCmd));
         activateManualOverrideStatus("DIRCON polling");
         reassertManualIncline(currentIncline, "DIRCON polling");
         for (ClientState client : clients.values()) {
@@ -1218,7 +1236,14 @@ public class DirconServer {
      * so DIRCON knows not to treat the resulting change as manual.
      */
     public void setFtmsTargetIncline(double incline) {
-        inclineCommandTracker.setTargetIncline(incline, System.currentTimeMillis());
+        long nowMs = SystemClock.elapsedRealtime();
+        inclineCommandTracker.setTargetIncline(incline, nowMs);
+        NordicFtmsLogger.getInstance().trace(context, "tracker_command_dircon",
+                String.format(java.util.Locale.US,
+                        "incline=%.2f%% pending=%d oldestAgeMs=%d",
+                        incline,
+                        inclineCommandTracker.getPendingCount(),
+                        inclineCommandTracker.getOldestPendingAgeMs(nowMs)));
     }
 
     private void reassertManualIncline(double inclinePercent, String source) {
@@ -1249,7 +1274,7 @@ public class DirconServer {
 
                 double currentIncline = grpc.getLastInclinePercent();
                 if (!Double.isNaN(currentIncline)
-                        && Math.abs(currentIncline - inclinePercent) <= INCLINE_TOLERANCE) {
+                        && Math.abs(currentIncline - inclinePercent) <= InclineTrackerConstants.INCLINE_TOLERANCE) {
                     Log.i(LOG_TAG, String.format(
                             "Manual incline reassert skipped via %s: already at %.1f%%",
                             source, currentIncline));
