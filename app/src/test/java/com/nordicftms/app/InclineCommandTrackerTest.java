@@ -8,13 +8,15 @@ public class InclineCommandTrackerTest {
     private static final double TOLERANCE = 0.3;
     private static final long RETENTION_MS = 5000L;
     private static final int MAX_PENDING_TARGETS = 12;
+    private static final long COMMAND_COOLDOWN_MS = 0L;
 
     @Test
     public void matchesRapidSuccessiveCommandTargets() {
         InclineCommandTracker tracker = new InclineCommandTracker(
                 TOLERANCE,
                 RETENTION_MS,
-                MAX_PENDING_TARGETS
+                MAX_PENDING_TARGETS,
+                COMMAND_COOLDOWN_MS
         );
 
         assertEquals(
@@ -41,7 +43,8 @@ public class InclineCommandTrackerTest {
         InclineCommandTracker tracker = new InclineCommandTracker(
                 TOLERANCE,
                 RETENTION_MS,
-                MAX_PENDING_TARGETS
+                MAX_PENDING_TARGETS,
+                COMMAND_COOLDOWN_MS
         );
 
         assertEquals(
@@ -63,7 +66,8 @@ public class InclineCommandTrackerTest {
         InclineCommandTracker tracker = new InclineCommandTracker(
                 TOLERANCE,
                 RETENTION_MS,
-                MAX_PENDING_TARGETS
+                MAX_PENDING_TARGETS,
+                COMMAND_COOLDOWN_MS
         );
 
         assertEquals(
@@ -84,7 +88,8 @@ public class InclineCommandTrackerTest {
         InclineCommandTracker tracker = new InclineCommandTracker(
                 TOLERANCE,
                 RETENTION_MS,
-                MAX_PENDING_TARGETS
+                MAX_PENDING_TARGETS,
+                COMMAND_COOLDOWN_MS
         );
 
         tracker.setTargetIncline(3.0, 100L);
