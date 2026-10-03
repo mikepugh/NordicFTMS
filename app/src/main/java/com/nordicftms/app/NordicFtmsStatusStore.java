@@ -80,6 +80,10 @@ public final class NordicFtmsStatusStore {
             snapshot.reconnectAttempt = 0;
             snapshot.detailedTracingEnabled = false;
             snapshot.kickrRunModeEnabled = true;
+            snapshot.diagnosticReportStatus = "No diagnostic report requested";
+            snapshot.diagnosticReportInProgress = false;
+            snapshot.backendPath = "Not connected";
+            snapshot.backendAttemptSummary = "";
         }
     }
 

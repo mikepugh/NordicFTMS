@@ -35,6 +35,7 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -54,7 +55,7 @@ import io.grpc.stub.MetadataUtils;
 import io.grpc.stub.StreamObserver;
 
 /**
- * gRPC client that connects to the GlassOS service on localhost:54321 with mTLS.
+ * gRPC client that tries localhost:54321, then verified loopback listeners with mTLS.
  * Uses certificates extracted from the GlassOS APK to authenticate as com.ifit.dev_app.
  */
 public class GrpcControlService {
@@ -123,8 +124,7 @@ public class GrpcControlService {
     private volatile boolean connected = false;
     private volatile boolean advancedSubscriptionsStarted = false;
     private volatile boolean consoleInfoSubscriptionStarted = false;
-    private volatile Throwable lastConsoleInfoFetchError;
-    private volatile String lastConsoleInfoFetchErrorSource = "unknown";
+    private volatile ConsoleDiscoveryDiagnostics consoleDiscovery = new ConsoleDiscoveryDiagnostics();
     private volatile Throwable lastConnectionError;
     private volatile String lastConnectionErrorSource = "unknown";
     private volatile long activeGeneration = 0L;
@@ -135,6 +135,15 @@ public class GrpcControlService {
     private volatile double cachedResistance = 0.0;
     private volatile double cachedCadenceRpm = 0.0;
     private volatile double cachedWatts = 0.0;
+    private final BackendAttemptTrace backendAttempts = new BackendAttemptTrace();
+    private final LoopbackBackendDiscovery endpointDiscovery = new LoopbackBackendDiscovery();
+    private final java.util.List<java.util.Map<String, Object>> endpointHistory = new java.util.ArrayList<>();
+    private LoopbackBackendDiscovery.Endpoint lastWorkingEndpoint;
+    private volatile String activeEndpoint = HOST + ":" + PORT;
+    private volatile String activeConnectionPath = "grpc_default";
+    private volatile java.util.Map<String, Object> tlsDetails = java.util.Collections.emptyMap();
+    private volatile java.util.Map<String, Object> discoveryDetails = java.util.Collections.emptyMap();
+    private java.util.Map<String, Object> primaryFailure = java.util.Collections.emptyMap();
 
     public GrpcControlService(Context context, BackendUnavailableListener listener) {
         this.appContext = context.getApplicationContext();
@@ -142,8 +151,84 @@ public class GrpcControlService {
     }
 
     public synchronized boolean connect() {
-        resetConnectionErrors();
+        primaryFailure = java.util.Collections.emptyMap();
+        discoveryDetails = java.util.Collections.emptyMap();
+        updateBackendStatus("Checking GlassOS", HOST + ":" + PORT);
+        if (tryEndpoint(HOST, PORT, "grpc_default", CONSOLE_INFO_FETCH_ATTEMPTS, 5000)) return true;
+        primaryFailure = endpointHistory.get(endpointHistory.size() - 1);
+        Throwable primaryError = lastConnectionError;
+        if (Thread.currentThread().isInterrupted()) return false;
+        if (lastWorkingEndpoint != null) {
+            endpointDiscovery.validationAttempted(lastWorkingEndpoint);
+            if (tryEndpoint(lastWorkingEndpoint.host, lastWorkingEndpoint.port, "grpc_remembered", 1, 1500)) return true;
+        }
+        if (Thread.currentThread().isInterrupted()) return false;
+        updateBackendStatus("Discovering GlassOS", "Checking local TCP listeners");
+        LoopbackBackendDiscovery.Result discovery = endpointDiscovery.discover();
+        discoveryDetails = discovery.details;
+        backendAttempts.record("loopback_discovery", "tcp_listeners", String.valueOf(discoveryDetails.get("scan_outcome")),
+                ((Number) discoveryDetails.get("duration_ms")).longValue(), discoveryDetails.toString());
+        recordConnectionDiagnostics();
+        int attempted = 0;
+        for (LoopbackBackendDiscovery.Endpoint candidate : discovery.candidates) {
+            if (Thread.currentThread().isInterrupted() || attempted >= 4) break;
+            endpointDiscovery.validationAttempted(candidate);
+            attempted++;
+            java.util.Map<String, Object> progress = new java.util.LinkedHashMap<>(discovery.details);
+            progress.put("validation_attempts", attempted);
+            progress.put("validation_deferred", discovery.candidates.size() - attempted);
+            discoveryDetails = java.util.Collections.unmodifiableMap(progress);
+            if (tryEndpoint(candidate.host, candidate.port, "grpc_discovered", 1, 1500)) {
+                lastWorkingEndpoint = candidate;
+                SupportDiagnostics.request(appContext, "alternate_endpoint_selected", false);
+                return true;
+            }
+        }
+        updateBackendStatus("No verified GlassOS endpoint", "Default: " + primaryFailure.get("failure_category")
+                + "; discovery: " + discoveryDetails.get("scan_outcome"));
+        lastConnectionError = new IllegalStateException("No verified GlassOS endpoint. Default " + HOST + ":" + PORT
+                + ": " + primaryFailure.get("error") + "; discovery: " + discoveryDetails.get("scan_outcome"), primaryError);
+        lastConnectionErrorSource = "backend_discovery";
+        recordConnectionDiagnostics();
+        logger.warn(appContext, "backend_paths_unavailable", "No verified GlassOS endpoint. Default: "
+                + primaryFailure.get("error") + "; discovery: " + discoveryDetails.get("scan_outcome"));
+        return false;
+    }
+
+    private boolean tryEndpoint(String host, int port, String path, int attempts, long rpcTimeoutMs) {
+        activeEndpoint = host.contains(":") ? "[" + host + "]:" + port : host + ":" + port;
+        activeConnectionPath = path;
+        long started = System.nanoTime();
+        backendAttempts.record(path, "connect", "started", 0, activeEndpoint);
+        updateBackendStatus("Checking GlassOS", activeEndpoint);
+        boolean ready = connectGrpc(host, port, attempts, rpcTimeoutMs);
+        long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+        backendAttempts.record(path, "console_discovery", ready ? "ready" : "failed", durationMs,
+                activeEndpoint + ": " + consoleDiscovery.describe());
+        java.util.Map<String, Object> summary = new java.util.LinkedHashMap<>();
+        summary.put("endpoint", activeEndpoint);
+        summary.put("path", path);
+        summary.put("at_ms", System.currentTimeMillis());
+        summary.put("duration_ms", durationMs);
+        summary.put("ready", ready);
+        summary.put("failure_category", ready ? "none" : BackendAttemptTrace.classify(lastConnectionError));
+        summary.put("error", lastConnectionError == null ? "" : ConsoleDiscoveryDiagnostics.describeError(lastConnectionError));
+        summary.put("rpc_outcomes", consoleDiscovery.describe());
+        summary.put("handshake", tlsDetails.get("handshake"));
+        summary.put("server_chain_validation", tlsDetails.get("server_chain_validation"));
+        Object peer = tlsDetails.get("presented_peer_leaf");
+        if (peer instanceof java.util.Map) summary.put("presented_peer_sha256", ((java.util.Map<?, ?>) peer).get("sha256"));
+        endpointHistory.add(java.util.Collections.unmodifiableMap(summary));
+        if (endpointHistory.size() > 8) endpointHistory.remove(0);
+        if (ready) updateBackendStatus("GlassOS gRPC", activeEndpoint + " (verified)");
+        recordConnectionDiagnostics();
+        return ready;
+    }
+
+    private boolean connectGrpc(String host, int port, int attempts, long rpcTimeoutMs) {
         disconnectInternal(false, DisconnectReason.LOCAL_REQUEST);
+        resetConnectionErrors();
+        tlsDetails = java.util.Collections.emptyMap();
         long generation = generationCounter.incrementAndGet();
         activeGeneration = generation;
         disconnectReason = DisconnectReason.NONE;
@@ -154,7 +239,7 @@ public class GrpcControlService {
             Metadata headers = new Metadata();
             headers.put(CLIENT_ID_KEY, CLIENT_ID);
 
-            channel = OkHttpChannelBuilder.forAddress(HOST, PORT)
+            channel = OkHttpChannelBuilder.forAddress(host, port)
                     .sslSocketFactory(sslSocketFactory)
                     .overrideAuthority("localhost")
                     .intercept(MetadataUtils.newAttachHeadersInterceptor(headers))
@@ -180,13 +265,13 @@ public class GrpcControlService {
             // real console capabilities shortly after transport startup.
             subscribeConsoleInfo(generation);
 
-            if (!resolveInitialConsoleInfo(generation)) {
-                lastConnectionError = lastConsoleInfoFetchError != null
-                        ? lastConsoleInfoFetchError
-                        : new IllegalStateException("Initial console info fetch did not return usable data");
-                lastConnectionErrorSource = lastConsoleInfoFetchErrorSource;
-                logger.warn(appContext, "grpc_backend_not_ready", "gRPC transport created but backend is not ready yet via "
-                        + lastConnectionErrorSource, lastConnectionError);
+            if (!resolveInitialConsoleInfo(generation, attempts, rpcTimeoutMs)) {
+                lastConnectionError = consoleDiscovery.asException();
+                lastConnectionErrorSource = "console_discovery";
+                recordConnectionDiagnostics();
+                logger.warn(appContext, "grpc_backend_not_ready",
+                        "GlassOS console discovery is not ready at " + activeEndpoint + ". "
+                                + consoleDiscovery.describe(), lastConnectionError);
                 disconnectInternal(false, DisconnectReason.CONNECT_RETRY);
                 return false;
             }
@@ -194,12 +279,16 @@ public class GrpcControlService {
             connected = true;
             backendUnavailableReported.set(false);
             disconnectReason = DisconnectReason.NONE;
-            logger.info(appContext, "grpc_ready", "gRPC backend ready on " + HOST + ":" + PORT + " with mTLS");
+            recordConnectionDiagnostics();
+            logger.info(appContext, "grpc_ready", "gRPC backend ready on " + activeEndpoint + " with mTLS");
             return true;
 
         } catch (Exception e) {
             lastConnectionError = e;
             lastConnectionErrorSource = "connect";
+            backendAttempts.record(activeConnectionPath, "setup", BackendAttemptTrace.classify(e), 0,
+                    ConsoleDiscoveryDiagnostics.describeError(e));
+            recordConnectionDiagnostics();
             logger.error(appContext, "grpc_connect_error", "Failed to connect gRPC backend", e);
             disconnectInternal(false, DisconnectReason.CONNECT_RETRY);
             return false;
@@ -220,6 +309,13 @@ public class GrpcControlService {
         return connected;
     }
 
+    private void updateBackendStatus(String name, String summary) {
+        NordicFtmsStatusStore.getInstance().update(snapshot -> {
+            snapshot.backendPath = name;
+            snapshot.backendAttemptSummary = summary;
+        });
+    }
+
     public Throwable getLastConnectionError() {
         return lastConnectionError;
     }
@@ -228,24 +324,47 @@ public class GrpcControlService {
         return lastConnectionErrorSource;
     }
 
+    private void recordConnectionDiagnostics() {
+        java.util.Map<String, Object> details = new java.util.LinkedHashMap<>();
+        details.put("captured_at_ms", System.currentTimeMillis());
+        details.put("endpoint", activeEndpoint);
+        details.put("connected", connected);
+        details.put("generation", activeGeneration);
+        details.put("rpc_outcomes", consoleDiscovery.snapshotOutcomes());
+        details.put("attempts", backendAttempts.snapshot());
+        details.put("tls", tlsDetails);
+        details.put("discovery", discoveryDetails);
+        details.put("primary_failure", primaryFailure);
+        details.put("endpoint_history", new java.util.ArrayList<>(endpointHistory));
+        details.put("active_path", connected ? activeConnectionPath : "none");
+        details.put("error_source", lastConnectionErrorSource);
+        if (lastConnectionError != null) {
+            details.put("error", ConsoleDiscoveryDiagnostics.describeError(lastConnectionError));
+        }
+        ManagedChannel currentChannel = channel;
+        try {
+            details.put("channel_state", currentChannel == null ? "not_created" : currentChannel.getState(false).name());
+        } catch (UnsupportedOperationException error) {
+            details.put("channel_state", "unavailable");
+        }
+        SupportDiagnostics.recordBackend(details);
+    }
+
     // --- Console Info ---
 
-    private boolean resolveInitialConsoleInfo(long generation) {
-        lastConsoleInfoFetchError = null;
-        lastConsoleInfoFetchErrorSource = "initial_console_info";
-
-        for (int attempt = 1; attempt <= CONSOLE_INFO_FETCH_ATTEMPTS; attempt++) {
-            if (generation != activeGeneration) {
+    private boolean resolveInitialConsoleInfo(long generation, int attempts, long rpcTimeoutMs) {
+        for (int attempt = 1; attempt <= attempts; attempt++) {
+            if (generation != activeGeneration || Thread.currentThread().isInterrupted()) {
                 return false;
             }
             if (hasUsableConsoleInfo()) {
                 return true;
             }
 
-            if (fetchConsoleInfoFromRpc(false, attempt, generation)) {
+            if (fetchConsoleInfoFromRpc(false, attempt, generation, rpcTimeoutMs)) {
                 return true;
             }
-            if (fetchConsoleInfoFromRpc(true, attempt, generation)) {
+            if (fetchConsoleInfoFromRpc(true, attempt, generation, rpcTimeoutMs)) {
                 return true;
             }
 
@@ -253,15 +372,14 @@ public class GrpcControlService {
                 return true;
             }
 
-            if (attempt < CONSOLE_INFO_FETCH_ATTEMPTS) {
+            if (attempt < attempts) {
                 logger.info(appContext, "console_info_retry", "Console info not ready after attempt " + attempt
                         + ", retrying in " + CONSOLE_INFO_FETCH_RETRY_MS + " ms");
                 try {
                     Thread.sleep(CONSOLE_INFO_FETCH_RETRY_MS);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    lastConsoleInfoFetchError = e;
-                    lastConsoleInfoFetchErrorSource = "initial_console_info_resolution";
+                    consoleDiscovery.recordFailure("initial_console_info_resolution", e);
                     return false;
                 }
             }
@@ -270,43 +388,57 @@ public class GrpcControlService {
         return hasUsableConsoleInfo();
     }
 
-    private boolean fetchConsoleInfoFromRpc(boolean useKnownConsoleInfo, int attempt, long generation) {
+    private boolean fetchConsoleInfoFromRpc(boolean useKnownConsoleInfo, int attempt, long generation, long rpcTimeoutMs) {
         String source = useKnownConsoleInfo ? "GetKnownConsoleInfo" : "GetConsole";
+        if (generation != activeGeneration || Thread.currentThread().isInterrupted() || consoleDiscovery.isUnsupported(source)) {
+            return false;
+        }
 
+        long started = android.os.SystemClock.elapsedRealtime();
         try {
             ConsoleInfo fetchedConsoleInfo = useKnownConsoleInfo
-                    ? consoleStub.withDeadlineAfter(5, TimeUnit.SECONDS)
+                    ? consoleStub.withDeadlineAfter(rpcTimeoutMs, TimeUnit.MILLISECONDS)
                     .getKnownConsoleInfo(Empty.getDefaultInstance())
-                    : consoleStub.withDeadlineAfter(5, TimeUnit.SECONDS)
+                    : consoleStub.withDeadlineAfter(rpcTimeoutMs, TimeUnit.MILLISECONDS)
                     .getConsole(Empty.getDefaultInstance());
 
-            return applyConsoleInfo(source, fetchedConsoleInfo, attempt, generation);
+            boolean usable = applyConsoleInfo(source, fetchedConsoleInfo, attempt, generation);
+            backendAttempts.record(activeConnectionPath, source, usable ? "ready" : "empty_response",
+                    android.os.SystemClock.elapsedRealtime() - started, activeEndpoint + "; attempt=" + attempt);
+            return usable;
         } catch (Exception e) {
             if (hasUsableConsoleInfo()) {
                 logger.info(appContext, "console_info_fetch_ignored", "Console info fetch via " + source
                         + " failed on attempt " + attempt + " but usable console info is already cached");
                 return true;
             }
-            if (isBackendUnavailableSignal(e) || isChannelShutdownSignal(e)) {
+            if (isBackendUnavailableSignal(e) || isChannelShutdownSignal(e)
+                    || Status.fromThrowable(e).getCode() == Status.Code.UNIMPLEMENTED) {
                 logger.info(appContext, "console_info_fetch_retryable", "Console info via " + source
                         + " is not ready yet on attempt " + attempt + ": " + summarizeTransportError(e));
             } else {
                 logger.error(appContext, "console_info_fetch_error", "Failed to fetch console info via " + source
                         + " (attempt " + attempt + ")", e);
             }
-            lastConsoleInfoFetchError = e;
-            lastConsoleInfoFetchErrorSource = source;
+            consoleDiscovery.recordFailure(source, e);
+            backendAttempts.record(activeConnectionPath, source, BackendAttemptTrace.classify(e),
+                    android.os.SystemClock.elapsedRealtime() - started, ConsoleDiscoveryDiagnostics.describeError(e));
             return false;
         }
     }
 
     private void subscribeConsoleInfo(long generation) {
-        if (consoleAsyncStub == null || channel == null || consoleInfoSubscriptionStarted) {
-            return;
+        ConsoleServiceGrpc.ConsoleServiceStub stub;
+        synchronized (consoleInfoLock) {
+            if (generation != activeGeneration || consoleAsyncStub == null || channel == null
+                    || consoleInfoSubscriptionStarted || consoleDiscovery.isUnsupported("ConsoleChanged")) {
+                return;
+            }
+            consoleInfoSubscriptionStarted = true;
+            stub = consoleAsyncStub;
         }
 
-        consoleInfoSubscriptionStarted = true;
-        consoleAsyncStub.consoleChanged(Empty.getDefaultInstance(), new StreamObserver<ConsoleInfo>() {
+        stub.consoleChanged(Empty.getDefaultInstance(), new StreamObserver<ConsoleInfo>() {
             @Override
             public void onNext(ConsoleInfo updatedConsoleInfo) {
                 applyConsoleInfo("ConsoleChanged", updatedConsoleInfo, 0, generation);
@@ -314,7 +446,18 @@ public class GrpcControlService {
 
             @Override
             public void onError(Throwable t) {
-                consoleInfoSubscriptionStarted = false;
+                synchronized (consoleInfoLock) {
+                    if (generation != activeGeneration) return;
+                    consoleInfoSubscriptionStarted = false;
+                    consoleDiscovery.recordFailure("ConsoleChanged", t);
+                }
+                if (!connected) {
+                    // Discovery streams must recover even before readiness is established.
+                    if (!isNonTransientError(t)) {
+                        retryConsoleInfoSubscription(CONSOLE_INFO_STREAM_RETRY_MS, generation);
+                    }
+                    return;
+                }
                 handleSubscriptionError(
                         "console_subscription",
                         "console_subscription_error",
@@ -328,8 +471,13 @@ public class GrpcControlService {
 
             @Override
             public void onCompleted() {
-                consoleInfoSubscriptionStarted = false;
-                logger.info(appContext, "console_subscription_completed", "Console info subscription completed");
+                synchronized (consoleInfoLock) {
+                    if (generation != activeGeneration) return;
+                    consoleInfoSubscriptionStarted = false;
+                    consoleDiscovery.recordStreamCompleted();
+                }
+                logger.info(appContext, "console_subscription_completed", "Console info subscription completed; resubscribing");
+                retryConsoleInfoSubscription(CONSOLE_INFO_STREAM_RETRY_MS, generation);
             }
         });
     }
@@ -346,6 +494,8 @@ public class GrpcControlService {
         boolean updatedMachineType = false;
 
         synchronized (consoleInfoLock) {
+            if (generation != activeGeneration) return false;
+            consoleDiscovery.recordResponse(source, infoUsable);
             ConsoleInfo previousConsoleInfo = consoleInfo;
             boolean previousInfoUsable = isConsoleInfoUsable(previousConsoleInfo);
 
@@ -367,10 +517,6 @@ public class GrpcControlService {
             updatedMachineType = previousMachineType != machineType;
         }
 
-        if (infoUsable) {
-            lastConsoleInfoFetchError = null;
-            lastConsoleInfoFetchErrorSource = "unknown";
-        }
         logConsoleInfo(source, updatedConsoleInfo, attempt, infoUsable);
         SentryDiagnostics.recordConsoleInfo(
                 updatedConsoleInfo,
@@ -603,6 +749,7 @@ public class GrpcControlService {
         consoleAsyncStub.consoleStateChanged(Empty.getDefaultInstance(), new StreamObserver<ConsoleStateResponse>() {
             @Override
             public void onNext(ConsoleStateResponse data) {
+                if (generation != activeGeneration) return;
                 logger.trace(appContext, "console_state_changed",
                         "consoleState=" + data.getConsoleState());
             }
@@ -635,6 +782,7 @@ public class GrpcControlService {
         workoutAsyncStub.workoutStateChanged(Empty.getDefaultInstance(), new StreamObserver<WorkoutStateResponse>() {
             @Override
             public void onNext(WorkoutStateResponse data) {
+                if (generation != activeGeneration) return;
                 logger.trace(appContext, "workout_state_changed",
                         "workoutState=" + data.getWorkoutState());
             }
@@ -667,6 +815,7 @@ public class GrpcControlService {
         speedAsyncStub.speedSubscription(Empty.getDefaultInstance(), new StreamObserver<SpeedData>() {
             @Override
             public void onNext(SpeedData data) {
+                if (generation != activeGeneration) return;
                 lastSpeedKph = data.getLastKph();
                 cachedSpeedKph = lastSpeedKph;
             }
@@ -701,6 +850,7 @@ public class GrpcControlService {
 
             @Override
             public void onNext(InclineData data) {
+                if (generation != activeGeneration) return;
                 double value = data.getLastInclinePercent();
                 double delta = Double.isNaN(priorValue) ? 0.0 : value - priorValue;
                 priorValue = value;
@@ -740,6 +890,7 @@ public class GrpcControlService {
         distanceAsyncStub.distanceSubscription(Empty.getDefaultInstance(), new StreamObserver<DistanceData>() {
             @Override
             public void onNext(DistanceData data) {
+                if (generation != activeGeneration) return;
                 lastDistanceKm = data.getLastDistanceKm();
                 cachedDistanceKm = lastDistanceKm;
                 logger.debug(appContext, "distance_subscription_update",
@@ -774,6 +925,7 @@ public class GrpcControlService {
         resistanceAsyncStub.resistanceSubscription(Empty.getDefaultInstance(), new StreamObserver<ResistanceData>() {
             @Override
             public void onNext(ResistanceData data) {
+                if (generation != activeGeneration) return;
                 lastResistance = data.getLastResistance();
                 cachedResistance = lastResistance;
             }
@@ -806,6 +958,7 @@ public class GrpcControlService {
         cadenceAsyncStub.cadenceSubscription(Empty.getDefaultInstance(), new StreamObserver<CadenceData>() {
             @Override
             public void onNext(CadenceData data) {
+                if (generation != activeGeneration) return;
                 lastCadenceRpm = data.getLastRpm();
                 cachedCadenceRpm = lastCadenceRpm;
             }
@@ -838,6 +991,7 @@ public class GrpcControlService {
         wattsAsyncStub.wattsSubscription(Empty.getDefaultInstance(), new StreamObserver<WattsData>() {
             @Override
             public void onNext(WattsData data) {
+                if (generation != activeGeneration) return;
                 lastWatts = data.getLastWatts();
                 cachedWatts = lastWatts;
             }
@@ -879,11 +1033,16 @@ public class GrpcControlService {
             return;
         }
 
-        callbackExecutor.schedule(() -> {
-            if (channel != null && generation == activeGeneration) {
-                subscribeConsoleInfo(generation);
-            }
-        }, delayMs, TimeUnit.MILLISECONDS);
+        try {
+            callbackExecutor.schedule(() -> {
+                if (channel != null && generation == activeGeneration) {
+                    subscribeConsoleInfo(generation);
+                }
+            }, delayMs, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException e) {
+            // A stream can finish while shutdown() is retiring the executor.
+            if (!callbackExecutor.isShutdown()) throw e;
+        }
     }
 
     private void handleCommandFailure(
@@ -1009,11 +1168,37 @@ public class GrpcControlService {
         KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
         kmf.init(keyStore, "".toCharArray());
 
+        java.util.Map<String, Object> credentials = new java.util.LinkedHashMap<>();
+        credentials.put("ca", TlsDiagnostics.certificate(caCert));
+        credentials.put("client", TlsDiagnostics.certificate(clientCert));
+        credentials.put("handshake", "not_observed");
+        tlsDetails = java.util.Collections.unmodifiableMap(credentials);
+        final long generation = activeGeneration;
+        final String path = activeConnectionPath;
+        final String endpoint = activeEndpoint;
         SSLContext sslContext = SSLContext.getInstance("TLS");
-        sslContext.init(kmf.getKeyManagers(), tmf.getTrustManagers(), null);
-
-        logger.info(appContext, "grpc_ssl_ready", "SSL context created with mTLS (client CN: " + clientCert.getSubjectDN() + ")");
-        return sslContext.getSocketFactory();
+        sslContext.init(kmf.getKeyManagers(), TlsDiagnostics.observeTrust(tmf.getTrustManagers(), observed -> {
+            synchronized (consoleInfoLock) {
+                if (generation != activeGeneration) return;
+                java.util.Map<String, Object> result = new java.util.LinkedHashMap<>(tlsDetails);
+                result.putAll(observed);
+                tlsDetails = java.util.Collections.unmodifiableMap(result);
+                backendAttempts.record(path, "server_chain_validation", String.valueOf(observed.get("server_chain_validation")),
+                        0, endpoint + "; " + String.valueOf(observed.get("validation_error")));
+            }
+        }), null);
+        backendAttempts.record(path, "tls_configuration", "ready", 0,
+                endpoint + "; credentials loaded; this does not establish a TLS connection");
+        return new TlsDiagnostics(sslContext.getSocketFactory(), observed -> {
+            synchronized (consoleInfoLock) {
+                if (generation != activeGeneration) return;
+                java.util.Map<String, Object> result = new java.util.LinkedHashMap<>(tlsDetails);
+                result.putAll(observed);
+                tlsDetails = java.util.Collections.unmodifiableMap(result);
+                backendAttempts.record(path, "tls_handshake", "completed",
+                        ((Number) observed.get("duration_ms")).longValue(), endpoint + "; " + observed.get("protocol"));
+            }
+        });
     }
 
     private PrivateKey parsePrivateKey(byte[] pemBytes) throws Exception {
@@ -1062,6 +1247,7 @@ public class GrpcControlService {
         }
 
         boolean shouldNotify = backendUnavailableReported.compareAndSet(false, true);
+        recordConnectionDiagnostics();
         logger.warn(appContext, "grpc_backend_unavailable", "GlassOS backend became unavailable via " + source, error);
         disconnectInternal(false, DisconnectReason.BACKEND_FAILURE);
 
@@ -1151,8 +1337,7 @@ public class GrpcControlService {
     }
 
     private void resetConnectionErrors() {
-        lastConsoleInfoFetchError = null;
-        lastConsoleInfoFetchErrorSource = "unknown";
+        consoleDiscovery = new ConsoleDiscoveryDiagnostics();
         lastConnectionError = null;
         lastConnectionErrorSource = "unknown";
         backendUnavailableReported.set(false);
@@ -1162,7 +1347,9 @@ public class GrpcControlService {
     private void disconnectInternal(boolean log, DisconnectReason reason) {
         // Invalidate the generation first so in-flight stream callbacks bail out
         // before we null the stubs they reference.
-        generationCounter.incrementAndGet();
+        synchronized (consoleInfoLock) {
+            activeGeneration = generationCounter.incrementAndGet();
+        }
 
         ManagedChannel channelToClose = channel;
         disconnectReason = reason;
@@ -1195,16 +1382,9 @@ public class GrpcControlService {
         lastWatts = 0;
 
         if (channelToClose != null) {
-            try {
-                channelToClose.shutdown();
-                if (!channelToClose.awaitTermination(1500, TimeUnit.MILLISECONDS)) {
-                    channelToClose.shutdownNow();
-                    channelToClose.awaitTermination(3500, TimeUnit.MILLISECONDS);
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                logger.error(appContext, "grpc_shutdown_error", "Error shutting down the gRPC channel", e);
-            }
+            // All streams are intentionally being discarded. Do not wait for their
+            // callbacks while holding the same monitor used by failure handling.
+            channelToClose.shutdownNow();
         }
 
         if (log) {

@@ -29,6 +29,11 @@ NordicFTMS communicates with the machine hardware through the GlassOS gRPC inter
 
 For standard Bluetooth FTMS, NordicFTMS advertises as `NordicFTMS`.
 
+NordicFTMS also exposes a persistent per-installation Bluetooth identity for apps
+that support reconnecting across Android BLE address changes. This requires
+client support; it does not fix auto-connect in existing PowerTread versions by
+itself. See [backend troubleshooting and the identity integration guide](docs/backend-discovery-and-bluetooth-identity.md).
+
 For supported treadmills, NordicFTMS also advertises a DIRCON service on your local network using a `KICKR RUN <id>`-style name. This allows Zwift to discover it as a controllable treadmill in addition to the normal run-speed sensor path.
 
 In practice, that means:

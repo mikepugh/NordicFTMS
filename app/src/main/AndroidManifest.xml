@@ -25,7 +25,16 @@
     <!-- Keep alive while advertising -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <queries>
+        <package android:name="com.ifit.glassos_service" />
+        <package android:name="com.ifit.mithlond" />
+        <package android:name="com.ifit.standalone" />
+        <package android:name="com.ifit.eru" />
+        <package android:name="com.ifit.launcher" />
+    </queries>
+
     <application
+        android:name=".NordicFtmsApplication"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"

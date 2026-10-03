@@ -47,6 +47,8 @@ public class MainActivity extends AppCompatActivity implements NordicFtmsStatusS
     private TextView currentCadenceValue;
     private TextView currentWattsValue;
     private TextView lastErrorValue;
+    private TextView diagnosticReportValue;
+    private Button sendDiagnosticReportButton;
     private Button grantPermissionButton;
     private Button openSettingsButton;
     private Button retryBackendButton;
@@ -135,6 +137,12 @@ public class MainActivity extends AppCompatActivity implements NordicFtmsStatusS
         currentCadenceValue = findViewById(R.id.current_cadence_value);
         currentWattsValue = findViewById(R.id.current_watts_value);
         lastErrorValue = findViewById(R.id.last_error_value);
+        diagnosticReportValue = findViewById(R.id.diagnostic_report_value);
+        sendDiagnosticReportButton = findViewById(R.id.send_diagnostic_report_button);
+        TextView supportIdValue = findViewById(R.id.support_id_value);
+        supportIdValue.setText("Support ID: " + SupportDiagnostics.getSupportId(this));
+        TextView appVersionValue = findViewById(R.id.app_version_value);
+        appVersionValue.setText("NordicFTMS version: " + BuildConfig.VERSION_NAME);
         grantPermissionButton = findViewById(R.id.grant_permission_button);
         openSettingsButton = findViewById(R.id.open_settings_button);
         retryBackendButton = findViewById(R.id.retry_backend_button);
@@ -152,6 +160,7 @@ public class MainActivity extends AppCompatActivity implements NordicFtmsStatusS
         restartBluetoothButton.setOnClickListener(view -> sendServiceAction(FTMSService.ACTION_RESTART_BLUETOOTH));
         hideToBackgroundButton.setOnClickListener(view -> moveTaskToBack(true));
         openPowerTreadButton.setOnClickListener(view -> openPowerTreadLink());
+        sendDiagnosticReportButton.setOnClickListener(view -> SupportDiagnostics.request(this, "manual", true));
 
         detailedTracingSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
             if (!buttonView.isPressed()) {
@@ -159,6 +168,7 @@ public class MainActivity extends AppCompatActivity implements NordicFtmsStatusS
             }
             NordicFtmsPreferences.setDetailedTracingEnabled(this, isChecked);
             logger.info(this, "ui_toggle_detailed_tracing", "Detailed tracing set to " + isChecked);
+            if (isChecked) SupportDiagnostics.request(this, "logging_enabled", false);
             sendServiceAction(FTMSService.ACTION_PREFERENCES_CHANGED);
         });
 
@@ -177,13 +187,16 @@ public class MainActivity extends AppCompatActivity implements NordicFtmsStatusS
         boolean permanentlyDenied = isBluetoothPermissionPermanentlyDenied();
         String missingPermissions = describeMissingPermissionsForDisplay();
         boolean healthy = isRuntimeHealthy(snapshot);
+        diagnosticReportValue.setText(snapshot.diagnosticReportStatus);
+        sendDiagnosticReportButton.setEnabled(!snapshot.diagnosticReportInProgress);
 
         statusTextView.setText(buildPrimaryStatus(snapshot, hasPermissions));
         detailTextView.setText(buildDetailStatus(snapshot, hasPermissions, permanentlyDenied, missingPermissions));
 
         serviceStateValue.setText("Service state: " + humanize(snapshot.serviceState.name()));
         permissionStateValue.setText("Bluetooth permissions: " + humanize(snapshot.bluetoothPermissionState.name()));
-        backendStateValue.setText("Backend: " + humanize(snapshot.backendState.name()));
+        backendStateValue.setText("Backend: " + humanize(snapshot.backendState.name()) + " / " + snapshot.backendPath
+                + "\n" + snapshot.backendAttemptSummary);
         bleStateValue.setText("Bluetooth peripheral: " + humanize(snapshot.bleState.name()));
         dirconProfileValue.setText("DIRCON profile: " + humanize(snapshot.dirconProfile.name()));
         advertisedNameValue.setText("FTMS name: " + snapshot.advertisedFtmsName);

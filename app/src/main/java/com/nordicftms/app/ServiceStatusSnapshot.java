@@ -140,6 +140,10 @@ public final class ServiceStatusSnapshot {
     public int reconnectAttempt = 0;
     public boolean detailedTracingEnabled = false;
     public boolean kickrRunModeEnabled = true;
+    public String diagnosticReportStatus = "No diagnostic report requested";
+    public boolean diagnosticReportInProgress = false;
+    public String backendPath = "Not connected";
+    public String backendAttemptSummary = "";
 
     public ServiceStatusSnapshot() {
     }
@@ -158,6 +162,10 @@ public final class ServiceStatusSnapshot {
         reconnectAttempt = other.reconnectAttempt;
         detailedTracingEnabled = other.detailedTracingEnabled;
         kickrRunModeEnabled = other.kickrRunModeEnabled;
+        diagnosticReportStatus = other.diagnosticReportStatus;
+        diagnosticReportInProgress = other.diagnosticReportInProgress;
+        backendPath = other.backendPath;
+        backendAttemptSummary = other.backendAttemptSummary;
     }
 
     public static String emptyToUnknown(String value) {

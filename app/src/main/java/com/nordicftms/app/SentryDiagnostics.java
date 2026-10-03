@@ -5,6 +5,8 @@ import com.ifit.glassos.ConsoleType;
 
 import io.sentry.Sentry;
 import io.sentry.SentryLevel;
+import io.sentry.SentryEvent;
+import io.sentry.protocol.Message;
 
 /**
  * Small, low-volume Sentry helpers for field diagnostics.
@@ -98,15 +100,13 @@ public final class SentryDiagnostics {
             boolean bleExposed,
             boolean dirconExposed
     ) {
-        Sentry.withScope(scope -> {
-            scope.setLevel(SentryLevel.WARNING);
-            scope.setTag("startup_phase", emptyToUnknown(startupPhase));
-            scope.setTag("boot_source", emptyToUnknown(bootSource));
-            scope.setTag("missing_permissions", emptyToUnknown(missingPermissions));
-            scope.setTag("ble_exposed", Boolean.toString(bleExposed));
-            scope.setTag("dircon_exposed", Boolean.toString(dirconExposed));
-            Sentry.captureMessage("Bluetooth runtime permissions missing", SentryLevel.WARNING);
-        });
+        SentryEvent event = diagnosticEvent("Bluetooth runtime permissions missing", null);
+        event.setTag("startup_phase", emptyToUnknown(startupPhase));
+        event.setTag("boot_source", emptyToUnknown(bootSource));
+        event.setTag("missing_permissions", emptyToUnknown(missingPermissions));
+        event.setTag("ble_exposed", Boolean.toString(bleExposed));
+        event.setTag("dircon_exposed", Boolean.toString(dirconExposed));
+        Sentry.captureEvent(event);
     }
 
     public static void recordGrpcBackendUnavailable(
@@ -117,19 +117,22 @@ public final class SentryDiagnostics {
             boolean bleExposed,
             boolean dirconExposed
     ) {
-        Sentry.withScope(scope -> {
-            scope.setLevel(SentryLevel.WARNING);
-            scope.setTag("startup_phase", emptyToUnknown(startupPhase));
-            scope.setTag("grpc_source", emptyToUnknown(source));
-            scope.setTag("grpc_attempt", Integer.toString(Math.max(0, attempt)));
-            scope.setTag("ble_exposed", Boolean.toString(bleExposed));
-            scope.setTag("dircon_exposed", Boolean.toString(dirconExposed));
-            if (error != null) {
-                Sentry.captureException(error);
-            } else {
-                Sentry.captureMessage("GlassOS backend unavailable", SentryLevel.WARNING);
-            }
-        });
+        SentryEvent event = diagnosticEvent("GlassOS backend unavailable", error);
+        event.setTag("startup_phase", emptyToUnknown(startupPhase));
+        event.setTag("grpc_source", emptyToUnknown(source));
+        event.setTag("grpc_attempt", Integer.toString(Math.max(0, attempt)));
+        event.setTag("ble_exposed", Boolean.toString(bleExposed));
+        event.setTag("dircon_exposed", Boolean.toString(dirconExposed));
+        Sentry.captureEvent(event);
+    }
+
+    private static SentryEvent diagnosticEvent(String text, Throwable error) {
+        SentryEvent event = error == null ? new SentryEvent() : new SentryEvent(error);
+        Message message = new Message();
+        message.setFormatted(text);
+        event.setMessage(message);
+        event.setLevel(SentryLevel.WARNING);
+        return event;
     }
 
     public static void recordDirconProfileSelection(

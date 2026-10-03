@@ -223,12 +223,38 @@
             android:text="Last error: none"
             android:textColor="#FF7A1F1F" />
 
+        <TextView
+            android:id="@+id/app_version_value"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp" />
+
+        <TextView
+            android:id="@+id/support_id_value"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textIsSelectable="true" />
+
+        <TextView
+            android:id="@+id/diagnostic_report_value"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:textIsSelectable="true" />
+
+        <Button
+            android:id="@+id/send_diagnostic_report_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Send diagnostic report" />
+
         <com.google.android.material.switchmaterial.SwitchMaterial
             android:id="@+id/detailed_tracing_switch"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
-            android:text="Enable detailed tracing and logging for troubleshooting" />
+            android:text="Detailed logging and automatic diagnostic reports" />
 
         <com.google.android.material.switchmaterial.SwitchMaterial
             android:id="@+id/kickr_run_switch"

@@ -26,10 +26,14 @@ public class NordicFtmsStatusStoreTest {
         statusStore.update(snapshot -> {
             snapshot.backendState = ServiceStatusSnapshot.BackendState.RETRYING;
             snapshot.reconnectAttempt = 3;
+            snapshot.diagnosticReportStatus = "Collecting diagnostic report...";
+            snapshot.diagnosticReportInProgress = true;
         });
 
         assertEquals(ServiceStatusSnapshot.BackendState.RETRYING, latestSnapshot.get().backendState);
         assertEquals(3, latestSnapshot.get().reconnectAttempt);
+        assertTrue(latestSnapshot.get().diagnosticReportInProgress);
+        assertEquals("Collecting diagnostic report...", latestSnapshot.get().diagnosticReportStatus);
 
         statusStore.removeListener(listener);
     }

@@ -10,6 +10,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import io.sentry.Breadcrumb;
 import io.sentry.Sentry;
 import io.sentry.SentryLevel;
+import io.sentry.SentryEvent;
+import io.sentry.protocol.Message;
 
 public final class NordicFtmsLogger {
     private static final String LOG_TAG = "NordicFTMS";
@@ -145,21 +147,24 @@ public final class NordicFtmsLogger {
         }
         sentryThrottle.put(dedupeKey, nowMs);
 
-        Sentry.withScope(scope -> {
-            scope.setLevel(level);
-            scope.setTag("logger_event", eventName);
-            scope.setTag("detailed_tracing_enabled", Boolean.toString(detailedTracingEnabled));
-            if (tags != null) {
-                for (Map.Entry<String, String> entry : tags.entrySet()) {
-                    scope.setTag(entry.getKey(), entry.getValue());
-                }
-            }
+        Sentry.captureEvent(createEvent(level, eventName, renderedMessage, throwable, tags, detailedTracingEnabled));
+    }
 
-            if (throwable != null) {
-                Sentry.captureException(throwable);
-            } else {
-                Sentry.captureMessage(renderedMessage, level);
+    static SentryEvent createEvent(SentryLevel level, String eventName, String renderedMessage,
+                                  Throwable throwable, Map<String, String> tags, boolean detailedTracingEnabled) {
+        SentryEvent event = throwable == null ? new SentryEvent() : new SentryEvent(throwable);
+        Message message = new Message();
+        message.setFormatted(renderedMessage);
+        event.setMessage(message);
+        event.setLevel(level);
+        if (tags != null) {
+            for (Map.Entry<String, String> entry : tags.entrySet()) {
+                event.setTag(entry.getKey(), entry.getValue());
             }
-        });
+        }
+        // Put diagnostic fields on the event itself so they survive SDK scope/thread changes.
+        event.setTag("logger_event", eventName);
+        event.setTag("detailed_tracing_enabled", Boolean.toString(detailedTracingEnabled));
+        return event;
     }
 }

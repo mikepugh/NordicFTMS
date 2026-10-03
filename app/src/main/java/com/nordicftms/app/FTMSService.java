@@ -109,7 +109,8 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
     private volatile boolean runtimeStarted = false;
     private volatile boolean runtimeStartInProgress = false;
     private boolean startupTaskScheduled = false;
-    private boolean destroyed = false;
+    private volatile boolean destroyed = false;
+    private volatile boolean backendRetryRequested = false;
     private long lastBackendReportAtMs = 0L;
     private long lastPermissionReportAtMs = 0L;
     private int grpcRetryCount = 0;
@@ -128,6 +129,7 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
     private BluetoothGattCharacteristic indoorBikeDataCharacteristic;
     private BluetoothGattCharacteristic controlPointCharacteristic;
     private BluetoothGattCharacteristic machineStatusCharacteristic;
+    private byte[] peripheralIdentity;
 
     @Override
     public void onCreate() {
@@ -323,7 +325,7 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
 
     private void scheduleGrpcStartup(long delayMs) {
         synchronized (startupLock) {
-            if (destroyed || startupExecutor == null || startupTaskScheduled) {
+            if (destroyed || backendRetryRequested || startupExecutor == null || startupTaskScheduled) {
                 return;
             }
 
@@ -353,7 +355,7 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
 
     private void scheduleGrpcRetry() {
         synchronized (startupLock) {
-            if (destroyed || startupExecutor == null || startupTaskScheduled) {
+            if (destroyed || backendRetryRequested || startupExecutor == null || startupTaskScheduled) {
                 return;
             }
 
@@ -400,7 +402,11 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
             attemptNumber = grpcRetryCount + 1;
         }
 
-        if (!grpc.connect()) {
+        boolean connected = grpc.connect();
+        if (destroyed || backendRetryRequested) {
+            return;
+        }
+        if (!connected) {
             backendState = ServiceStatusSnapshot.BackendState.RETRYING;
             recordGrpcUnavailableIfNeeded(
                     "initial_connect",
@@ -425,7 +431,7 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
     }
 
     private void startRuntimeComponents() {
-        if (destroyed || grpc == null || !grpc.isConnected()) {
+        if (destroyed || backendRetryRequested || grpc == null || !grpc.isConnected()) {
             return;
         }
 
@@ -580,6 +586,7 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
             boolean bleExposed,
             boolean dirconExposed
     ) {
+        SupportDiagnostics.request(this, "backend_unavailable", false);
         long now = SystemClock.elapsedRealtime();
         if (now - lastBackendReportAtMs < BACKEND_REPORT_THROTTLE_MS) {
             return;
@@ -622,19 +629,22 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
 
     private void forceBackendRetry(String source) {
         logger.info(this, "manual_backend_retry", "Manual backend retry requested from " + source);
-        stopRuntimeComponents();
-        if (grpc != null) {
-            grpc.disconnect();
-        }
         synchronized (startupLock) {
+            if (destroyed || backendRetryRequested || startupExecutor == null) return;
+            backendRetryRequested = true;
             cancelPendingStartupLocked();
             grpcRetryCount = 0;
         }
-        if (!BluetoothPermissionGate.hasRequiredPermissions(this)) {
-            handleMissingPermissions(source);
-            return;
-        }
-        scheduleGrpcStartup(0L);
+        stopRuntimeComponents();
+        backendState = ServiceStatusSnapshot.BackendState.RETRYING;
+        transitionToState(ServiceStartupState.WAITING_FOR_GRPC);
+        // connect() is synchronized and may spend several RPC deadlines waiting
+        // for GlassOS. Never wait for its monitor on the UI thread.
+        startupExecutor.execute(() -> {
+            if (grpc != null) grpc.disconnect();
+            backendRetryRequested = false;
+            if (!destroyed) scheduleGrpcStartup(0L);
+        });
     }
 
     private void restartBluetoothPeripheral(String source) {
@@ -787,6 +797,13 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
 
         closeGattServer();
 
+        try {
+            peripheralIdentity = PeripheralIdentity.loadOrCreate(getNoBackupFilesDir());
+        } catch (java.io.IOException e) {
+            logger.error(this, "peripheral_identity_error", "Cannot load a persistent Bluetooth identity", e);
+            return false;
+        }
+
         BluetoothGattService ftmsService = new BluetoothGattService(
                 FTMS_SERVICE_UUID,
                 BluetoothGattService.SERVICE_TYPE_PRIMARY
@@ -852,10 +869,18 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
         );
         ftmsService.addCharacteristic(resistanceRangeChar);
 
+        BluetoothGattService identityService = new BluetoothGattService(
+                PeripheralIdentity.SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY);
+        identityService.addCharacteristic(new BluetoothGattCharacteristic(
+                PeripheralIdentity.CHARACTERISTIC_UUID,
+                BluetoothGattCharacteristic.PROPERTY_READ,
+                BluetoothGattCharacteristic.PERMISSION_READ));
+
         gattServicesToRegister.clear();
         gattServicesToRegister.put(ftmsService.getUuid(), ftmsService);
+        gattServicesToRegister.put(identityService.getUuid(), identityService);
         long generation = gattRegistrationCoordinator.begin(
-                Arrays.asList(ftmsService.getUuid())
+                Arrays.asList(ftmsService.getUuid(), identityService.getUuid())
         );
 
         gattServer = openGattServerSafely(createGattServerCallback(generation));
@@ -1018,7 +1043,15 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
 
             UUID uuid = characteristic.getUuid();
 
-            if (uuid.equals(FITNESS_MACHINE_FEATURE_UUID)) {
+            if (uuid.equals(PeripheralIdentity.CHARACTERISTIC_UUID)) {
+                byte[] value = peripheralIdentity;
+                if (value == null || offset < 0 || offset > value.length) {
+                    sendGattResponseSafely(device, requestId, BluetoothGatt.GATT_INVALID_OFFSET, offset, null);
+                } else {
+                    sendGattResponseSafely(device, requestId, BluetoothGatt.GATT_SUCCESS, offset,
+                            Arrays.copyOfRange(value, offset, value.length));
+                }
+            } else if (uuid.equals(FITNESS_MACHINE_FEATURE_UUID)) {
                 byte[] value = buildFeatureValue();
                 sendGattResponseSafely(device, requestId, BluetoothGatt.GATT_SUCCESS, offset,
                         Arrays.copyOfRange(value, offset, value.length));
@@ -1320,9 +1353,15 @@ public class FTMSService extends Service implements GrpcControlService.BackendUn
                 .addServiceUuid(new ParcelUuid(FTMS_SERVICE_UUID))
                 .build();
 
-        AdvertiseData scanResponse = new AdvertiseData.Builder()
-                .setIncludeTxPowerLevel(true)
-                .build();
+        AdvertiseData.Builder scanResponseBuilder = new AdvertiseData.Builder();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            scanResponseBuilder.addServiceData(new ParcelUuid(PeripheralIdentity.SERVICE_UUID), peripheralIdentity);
+        } else {
+            // Android 5-7 truncate service-data UUIDs to 16 bits. The identity
+            // remains available through GATT on these consoles.
+            scanResponseBuilder.setIncludeTxPowerLevel(true);
+        }
+        AdvertiseData scanResponse = scanResponseBuilder.build();
 
         AdvertiseCallback callback = createAdvertiseCallback(generation);
         advertiseCallback = callback;
