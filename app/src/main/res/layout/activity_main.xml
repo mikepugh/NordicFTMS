@@ -254,7 +254,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
-            android:text="Detailed logging and automatic diagnostic reports" />
+            android:text="Detailed logging and automatic diagnostic reports (turns off after 30 minutes)" />
 
         <com.google.android.material.switchmaterial.SwitchMaterial
             android:id="@+id/kickr_run_switch"

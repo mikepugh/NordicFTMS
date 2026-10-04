@@ -35,6 +35,9 @@ final class SupportDiagnostics {
             supportId = SupportIdentity.create();
         }
         Context app = context.getApplicationContext();
+        // Structured logs share the opt-in lifetime with automatic diagnostic reports.
+        Sentry.getCurrentScopes().getOptions().getLogs().setBeforeSend(log ->
+                NordicFtmsPreferences.isDetailedTracingEnabled(app) ? log : null);
         Sentry.getCurrentScopes().getOptions().addEventProcessor(new EventProcessor() {
             @Override
             public SentryEvent process(SentryEvent event, Hint hint) {

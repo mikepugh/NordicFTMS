@@ -5,8 +5,12 @@ ID, and a Send diagnostic report button. For an affected user, request an app
 update and their support ID (or a photo of this section). No ADB is required.
 
 With detailed logging enabled, reports are collected when the app process starts,
-when logging is enabled, and after backend failures. An existing enabled setting
-survives an in-place APK update. Manual reports also work with detailed logging
+when logging is enabled, and after backend failures. Detailed logging automatically
+turns off 30 minutes after it is enabled. The deadline survives process restarts
+and in-place updates; restarting the app does not start another 30-minute window.
+An enabled setting from an older build without a deadline is turned off on upgrade.
+Enable it again when another troubleshooting session is needed.
+Manual reports also work with detailed logging
 off and do not require a working GlassOS connection or Bluetooth permissions.
 Prefer an in-place update, not uninstall/reinstall. A fresh installation defaults
 to detailed logging off; after reinstall, check the toggle (Android may restore
@@ -120,6 +124,26 @@ reason per ten minutes within a process; manual reports have a thirty-second
 cooldown. Only one collection can run at a time. Turning detailed logging off
 prevents further automatic collection/submission; it cannot recall reports
 already queued. High-frequency NordicFTMS-Trace output remains local logcat.
+Sentry structured logs also require an active detailed logging session. Ordinary
+warning/error events and crash reporting remain enabled independently of this
+setting, so the timeout does not cap all Sentry usage.
+
+## Cutting off older builds
+
+The timeout requires an updated APK; it cannot change settings on older installs.
+To stop older builds consuming quota without deleting the project's history,
+create a new key under Sentry Project Settings > Client Keys (DSN), use its DSN
+as `SENTRY_DSN` for future builds, and disable the old key. Disabling a key also
+stops crash/error reports from every build using that key, including updated
+builds if they still use the old DSN. Allow up to 30 minutes for deactivation.
+Consider a server-side key error rate limit for the replacement key as a further
+quota safeguard; it can also drop useful reports when reached.
+
+References: [Sentry's guidance for older releases](https://sentry.zendesk.com/hc/en-us/articles/21850841366043-I-am-receiving-events-from-older-releases),
+[disabling a DSN](https://sentry.zendesk.com/hc/en-us/articles/23282860895131-What-happens-if-I-disable-the-DSN-of-a-project),
+and [client key error rate limits](https://docs.sentry.io/api/projects/update-a-client-key/).
+
+## Delivery configuration
 
 The UI says **queued for delivery**, not sent: a Sentry event ID does not confirm
 server receipt. Sentry handles transport/caching, and delivery requires internet
@@ -133,3 +157,56 @@ ID for that process without blocking startup.
 
 References: [Android package visibility](https://developer.android.com/training/package-visibility/declaring)
 and [console package observations](https://github.com/ciarancoffey/nordictrack-ftms-bridge/blob/main/docs/ARCHITECTURE.md).
+
+## Read-only Windows ADB collector
+
+For a user who already has authorized ADB access, send
+[`collect-glassos-diagnostics.ps1`](../collect-glassos-diagnostics.ps1).
+This bypasses Sentry delivery entirely. Leave iFIT enabled and the equipment idle;
+NordicFTMS does not need to be open, detailed logging is optional, and no Retry
+Backend action is required.
+
+Put the script beside `adb.exe`, open PowerShell in that directory, and run:
+
+```powershell
+.\collect-glassos-diagnostics.ps1
+```
+
+If the local execution policy blocks the reviewed script, this invocation applies
+only to the new PowerShell process, not the machine's saved policy:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\collect-glassos-diagnostics.ps1
+```
+
+Do not run as administrator or change managed organization policy. The script
+does not connect to a new device automatically. It accepts `-AdbPath`, `-Serial`
+(from `adb devices`, required when multiple devices are authorized), and
+`-OutputDirectory`. Its default output is a uniquely named UTF-8
+`NordicFTMS-diagnostics-*.txt` file on the PC's Desktop. Review it before sending
+privately to support; logs, process listings and service dumps can include
+identifiers, addresses, and incidental personal information. There is no upload
+or automatic redaction.
+
+The collector reads firmware details, relevant package versions/state, Android
+and Binder services, process snapshots, TCP listeners and raw TCP/Unix socket
+tables. It captures all log tags for matching running processes, including
+processes sharing a relevant application UID (but not every process sharing a
+system UID). Two process snapshots can catch processes that restart during
+collection. It also retains name-matching recent main/system and lifecycle logs
+to help identify failures from already-exited processes, plus a bounded crash
+buffer without filtering away native/Java stack context.
+
+Limits are explicit: up to 32 PIDs, logcat `-t 1500` per PID capture, `-t 8000`
+for filtered main/system logs, `-t 3000` for filtered lifecycle events, and
+`-t 500` for crashes. These are bounded snapshots, not complete startup history.
+Unknown backend names, PID reuse, shared UIDs and Android access restrictions
+can affect coverage/attribution. Normal logs from an already-exited PID are not
+fully recovered just because a lifecycle event names it. A process/socket name
+is not verification of GlassOS, and this collector performs no TLS/RPC probes.
+
+Each read records its timestamp, exit status, stderr and timeout state. Missing
+tools or permission errors are preserved, not reported as absent backends. A
+hung command has a bounded timeout that terminates only that PC-side ADB client.
+No app start/stop, reboot, root, settings change, log clearing, backend control,
+certificate extraction or private-app-file read is performed.

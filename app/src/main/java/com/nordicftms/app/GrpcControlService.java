@@ -719,7 +719,7 @@ public class GrpcControlService {
         // Opt-in diagnostic streams — used to investigate whether ConsoleState or
         // WorkoutState transitions correlate with hardware button presses. Gated
         // behind detailed tracing so production sessions don't hold extra server
-        // streams open. Remove the gate once we confirm no side effects.
+        // streams open. Retry attempts must obey the same diagnostic lifetime.
         if (NordicFtmsPreferences.isDetailedTracingEnabled(appContext)) {
             subscribeConsoleState(generation);
             subscribeWorkoutState(generation);
@@ -742,7 +742,8 @@ public class GrpcControlService {
     }
 
     private void subscribeConsoleState(long generation) {
-        if (!connected || consoleAsyncStub == null) {
+        if (!connected || consoleAsyncStub == null
+                || !NordicFtmsPreferences.isDetailedTracingEnabled(appContext)) {
             return;
         }
 
@@ -756,6 +757,7 @@ public class GrpcControlService {
 
             @Override
             public void onError(Throwable t) {
+                if (!NordicFtmsPreferences.isDetailedTracingEnabled(appContext)) return;
                 handleSubscriptionError(
                         "console_state_subscription",
                         "console_state_subscription_error",
@@ -775,7 +777,8 @@ public class GrpcControlService {
     }
 
     private void subscribeWorkoutState(long generation) {
-        if (!connected || workoutAsyncStub == null) {
+        if (!connected || workoutAsyncStub == null
+                || !NordicFtmsPreferences.isDetailedTracingEnabled(appContext)) {
             return;
         }
 
@@ -789,6 +792,7 @@ public class GrpcControlService {
 
             @Override
             public void onError(Throwable t) {
+                if (!NordicFtmsPreferences.isDetailedTracingEnabled(appContext)) return;
                 handleSubscriptionError(
                         "workout_state_subscription",
                         "workout_state_subscription_error",
