@@ -11,14 +11,17 @@ object RowerProtocolGuard {
         }
         val required = setOf(V1DataField.WATTS, V1DataField.STROKES, V1DataField.STROKES_PER_MINUTE)
         check(required.all { it.fieldIndex in fields }) {
-            "Rower did not declare watts/stroke count/stroke rate; no workout writes sent"
+            "Rower telemetry missing=${required.filter { it.fieldIndex !in fields }.joinToString { "${it.fieldIndex}:${it.name}" }}; " +
+                "declaredFields=${fields.sorted().joinToString()}; no workout writes sent"
         }
     }
 
     fun requireV2(features: Set<V2FeatureId>, reportedType: Float?) {
         check(setOf(V2FeatureId.WATTS, V2FeatureId.ROWER_TOTAL_STROKES,
             V2FeatureId.ROWER_STROKES_PER_MINUTE).all { it in features }) {
-            "Controller did not declare the required rower telemetry features; no workout writes sent"
+            "Rower telemetry missing=${setOf(V2FeatureId.WATTS, V2FeatureId.ROWER_TOTAL_STROKES,
+                V2FeatureId.ROWER_STROKES_PER_MINUTE).filter { it !in features }.joinToString { "${it.code}:${it.name}" }}; " +
+                "declaredFeatures=${features.sortedBy { it.code }.joinToString { "${it.code}:${it.name}" }}; no workout writes sent"
         }
         if (V2FeatureId.DEVICE_TYPE in features) {
             check(reportedType == 20f) {

@@ -40,11 +40,13 @@ class RowerBle(context: Context, private val name: String) {
             advertised.complete(Unit)
         }
         override fun onStartFailure(errorCode: Int) {
+            RowerLog.e("BLE", "Advertising failed code=$errorCode", null)
             advertised.completeExceptionally(IllegalStateException("Advertising failed: code=$errorCode"))
         }
     }
     private val callbacks = object : BluetoothGattServerCallback() {
         override fun onServiceAdded(status: Int, service: BluetoothGattService) {
+            RowerLog.i("BLE", "Service registration uuid=${service.uuid} status=$status")
             if (status == BluetoothGatt.GATT_SUCCESS) registered.complete(Unit)
             else registered.completeExceptionally(IllegalStateException("GATT service registration failed: $status"))
         }
@@ -79,6 +81,8 @@ class RowerBle(context: Context, private val name: String) {
         override fun onCharacteristicWriteRequest(device: BluetoothDevice, requestId: Int,
                                                  characteristic: BluetoothGattCharacteristic, preparedWrite: Boolean,
                                                  responseNeeded: Boolean, offset: Int, value: ByteArray) {
+            RowerLog.w("BLE", "Write rejected uuid=${characteristic.uuid} bytes=${value.size} " +
+                "offset=$offset prepared=$preparedWrite responseNeeded=$responseNeeded; control disabled")
             if (responseNeeded) server?.sendResponse(device, requestId,
                 BluetoothGatt.GATT_WRITE_NOT_PERMITTED, offset, null)
         }
@@ -86,12 +90,27 @@ class RowerBle(context: Context, private val name: String) {
             server?.sendResponse(device, requestId, BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED, 0, null)
         }
         override fun onNotificationSent(device: BluetoothDevice, status: Int) {
-            if (status != 0) RowerLog.w("BLE", "Notification completion status=$status")
+            if (status == 0) {
+                RowerLog.delivered++
+                if (RowerLog.delivered == 1L) RowerLog.i("BLE", "First notification completed successfully; app interpretation unverified")
+            } else {
+                RowerLog.notificationErrors++
+                RowerLog.w("BLE", "Notification completion status=$status")
+            }
+        }
+        override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
+            RowerLog.i("BLE", "Negotiated MTU=$mtu")
+        }
+        override fun onPhyUpdate(device: BluetoothDevice, txPhy: Int, rxPhy: Int, status: Int) {
+            RowerLog.i("BLE", "PHY tx=$txPhy rx=$rxPhy status=$status")
         }
     }
 
     suspend fun start() {
         check(adapter.isEnabled) { "Bluetooth is off" }
+        RowerLog.i("BLE", "Initialize enabled=${adapter.isEnabled} multipleAdvertisement=${adapter.isMultipleAdvertisementSupported} " +
+            "features=0040000000000000 characteristics=2ACC(read),2AD1(notify),2AD3(read/notify),2ADA(notify) " +
+            "controlPoint=ABSENT targetFeatures=0")
         try {
             check(adapter.setName(name)) { "Could not set BLE device name" }
             server = manager.openGattServer(appContext, callbacks) ?: error("Could not open GATT server")
@@ -135,6 +154,7 @@ class RowerBle(context: Context, private val name: String) {
     fun close() {
         if (closed) return
         closed = true
+        RowerLog.i("BLE", "Closing peripheral clients=${devices.size} queued=${RowerLog.notifications} completed=${RowerLog.delivered}")
         try {
             advertiser.stopAdvertising(advertisement)
         } finally {

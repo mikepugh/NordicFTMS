@@ -30,7 +30,7 @@ class RowerRadioTest {
         try {
             context.startForegroundService(Intent(context, RowerService::class.java))
             withTimeout(10_000) {
-                while (!RowerLog.state.startsWith("Error:")) delay(100)
+                while (!RowerLog.state.startsWith("Erreur :")) delay(100)
             }
             delay(1000)
             assertTrue(RowerLog.state.contains("GlassOS console detected"))

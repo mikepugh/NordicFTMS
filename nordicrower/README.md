@@ -1,7 +1,7 @@
 # NordicRower
 
 Independent experimental Android app: `com.nordicrower.app`, version
-`0.1.0-alpha.1`. It does not modify, extend, or depend on NordicFTMS/GlassOS.
+`0.1.0-alpha.2`. It does not modify, extend, or depend on NordicFTMS/GlassOS.
 
 ## Current Prototype
 
@@ -15,8 +15,14 @@ Independent experimental Android app: `com.nordicrower.app`, version
 - Local explicit session start and USB permission request; no boot autostart.
 - Read-only measurements: no BLE Control Point, remote resistance, target power,
   start/stop, or reset commands. No unsupported controls are advertised.
-- Local diagnostic export with bounded logs and basic serial-value redaction;
-  no network permission or automatic uploads.
+- French console UI, automatic bounded persistent logs across app restarts,
+  serial/address redaction, full exceptions and USB/BLE/telemetry phase evidence.
+- Explicit query-only capability discovery, separate from workout sessions:
+  full declared field/feature inventory, identity, resistance limits and
+  target/mode readbacks. No actuator writes, authentication unlock, calibration,
+  workout start/stop or firmware commands in this probe path.
+- Windows read-only ADB collector in `experimental/`, included with the APK.
+  No network permission or automatic uploads.
 
 **A controlled experimental trial, not a supported Rower700 solution.** Controller behavior,
 physical button handling, telemetry units/update cadence, disconnect recovery,
@@ -69,5 +75,24 @@ of 123 W and 24 strokes/min, and never opens USB. Two-device radio tests verify
 advertising, connection, discovery, subscriptions and measurement bytes. They
 do not validate real controller data or either rowing app's full handshake.
 
-See [experimental installation notes](../experimental/NordicRower-0.1.0-alpha.1.md)
+## Capability Evidence
+
+Disconnect the streaming session before starting discovery; the probe must not
+compete for the USB interface. It asks only for declared, known readback fields.
+V1 reads may be blocked by security; this is logged without unlocking. V2 lists
+must complete before subscriptions are attempted, and the rower type must be
+confirmed before reading targets/limits. Missing or malformed data is UNKNOWN.
+Declared resistance/ERG fields are candidates, not proof of writable features
+or working native ERG. Actual command acceptance requires a later controlled
+hardware test; this build never advertises remote control.
+
+The debug APK saves `files/diagnostics/{discovery,status,journal}.txt` plus two
+rotated journals (~3 MiB total). The collector reads only these app files via
+`adb shell run-as com.nordicrower.app cat ...`, recent logcat and relevant dumps.
+It does not start/stop apps, clear logs, connect to new devices or change settings.
+Run-as relies on the experimental APK being debuggable; other build types may
+deny it. Collect before uninstalling or clearing app data. Reports are private
+support material and system dumps may contain incidental identifiers.
+
+See [experimental installation notes](../experimental/NordicRower-0.1.0-alpha.2.md)
 for the test package, reversible setup, and validation limits.
