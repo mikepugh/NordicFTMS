@@ -1,0 +1,171 @@
+--- a/src/com/nettarion/hyperborea/core/model/ExerciseData.kt
++++ b/src/com/nettarion/hyperborea/core/model/ExerciseData.kt
+@@ -18,6 +18,7 @@
+     val verticalGain: Float? = null,
+     val strokeCount: Int? = null,
+     val strokeRate: Int? = null,
++    val receivedAtMillis: Long = 0L,
+ ) {
+     companion object {
+         /**
+--- a/src/com/nettarion/hyperborea/hardware/fitpro/session/ExerciseDataAccumulator.kt
++++ b/src/com/nettarion/hyperborea/hardware/fitpro/session/ExerciseDataAccumulator.kt
+@@ -99,6 +99,7 @@
+         verticalGain = verticalGain,
+         strokeCount = strokeCount,
+         strokeRate = strokeRate,
++        receivedAtMillis = System.nanoTime() / 1_000_000L,
+     )
+ 
+     fun reset() {
+--- a/src/com/nettarion/hyperborea/hardware/fitpro/v1/V1Session.kt
++++ b/src/com/nettarion/hyperborea/hardware/fitpro/v1/V1Session.kt
+@@ -205,6 +205,7 @@
+         ))
+         delay(COMMAND_DELAY_MS)
+ 
++        if (V1DataField.IS_READY_TO_DISCONNECT.fieldIndex !in supportedBitFields) return
+         repeat(READY_POLL_ATTEMPTS) {
+             val response = sendReadWrite(readFields = setOf(V1DataField.IS_READY_TO_DISCONNECT))
+             val ready = response?.fields?.get(V1DataField.IS_READY_TO_DISCONNECT)
+@@ -405,6 +406,7 @@
+         pollFields = computePollFields(supportedBitFields)
+         detectedDeviceType = DeviceDatabase.deviceTypeFromEquipmentId(equipmentDeviceId)
+         logger.d(TAG, "Detected device type: $detectedDeviceType")
++        com.nordicrower.app.RowerProtocolGuard.requireV1(deviceInfo.deviceId, supportedBitFields)
+ 
+         delay(COMMAND_DELAY_MS)
+ 
+@@ -514,7 +516,11 @@
+     }
+ 
+     private suspend fun readStartupFields(equipmentDeviceId: Int) {
+-        val response = sendReadWrite(readFields = V1DataField.startupReadFields)
++        val fieldsToRead = V1DataField.startupReadFields.filterTo(mutableSetOf()) {
++            it.fieldIndex in supportedBitFields
++        }
++        if (fieldsToRead.isEmpty()) return
++        val response = sendReadWrite(readFields = fieldsToRead)
+         if (response == null || response.status != V1Message.STATUS_DONE || response.fields.isEmpty()) {
+             logger.d(TAG, "Startup field read returned no data: $response")
+             return
+@@ -801,6 +807,10 @@
+                 logger.i(TAG, "DataResponse payload size now matches the requested field shape again.")
+             }
+             lastTruncatedSeen = decoded.isTruncated
++            if (decoded.isTruncated) {
++                _exerciseData.value = null
++                return
++            }
+ 
+             applyDataResponse(decoded.fields)
+             handleKeyObject(decoded.keyObject)
+@@ -869,7 +879,7 @@
+                     mcuErgMode = engaged
+                 }
+                 V1DataField.VERTICAL_METER_GAIN -> accumulator.updateVerticalGain(value)
+-                V1DataField.STROKES -> accumulator.updateStrokeCount(value.toInt())
++                V1DataField.STROKES -> accumulator.updateStrokeCount(value.toInt() and 0xffff)
+                 V1DataField.STROKES_PER_MINUTE -> accumulator.updateStrokeRate(value.toInt())
+                 // KEY_OBJECT is decoded onto DataResponse.keyObject and handled in handleKeyObject(),
+                 // so it never reaches this map — this case only keeps the `when` exhaustive.
+@@ -937,6 +947,7 @@
+     }
+ 
+     private fun estimatePowerIfNeeded() {
++        if (detectedDeviceType == DeviceType.ROWER) return
+         val snapshot = accumulator.snapshot()
+         if (snapshot.power != null && snapshot.power != 0) return // MCU provides power
+         val speed = snapshot.speed ?: return
+--- a/src/com/nettarion/hyperborea/hardware/fitpro/v2/V2Codec.kt
++++ b/src/com/nettarion/hyperborea/hardware/fitpro/v2/V2Codec.kt
+@@ -68,6 +68,7 @@
+         val sourceAndType = data[1].toInt() and 0xFF
+         val type = sourceAndType and 0x0F
+         val length = data[2].toInt() and 0xFF
++        if (length > data.size - 3) return null
+         val payload = if (data.size > 3) data.copyOfRange(3, minOf(3 + length, data.size)) else byteArrayOf()
+ 
+         return when (type) {
+--- a/src/com/nettarion/hyperborea/hardware/fitpro/v2/V2FeatureId.kt
++++ b/src/com/nettarion/hyperborea/hardware/fitpro/v2/V2FeatureId.kt
+@@ -40,6 +40,8 @@
+     TARGET_KPH(301),
+     CURRENT_KPH(302),
+     RPM(322),
++    ROWER_TOTAL_STROKES(343),
++    ROWER_STROKES_PER_MINUTE(344),
+     TARGET_GRADE(401),
+     CURRENT_GRADE(402),
+     TARGET_RESISTANCE(503),
+@@ -92,6 +94,7 @@
+         val subscribable: List<V2FeatureId> = listOf(
+             DEVICE_TYPE, SYSTEM_MODE, WORKOUT_STATE, CURRENT_CALORIES, PULSE, DISTANCE,
+             CURRENT_KPH, RPM, CURRENT_GRADE, TARGET_RESISTANCE, MAX_RESISTANCE, WATTS,
++            ROWER_TOTAL_STROKES, ROWER_STROKES_PER_MINUTE,
+             RUNNING_TIME, KEY_COOKED, REQUEST_DISCONNECT, TOTAL_IN_USE_SECONDS,
+             TOTAL_MACHINE_DISTANCE,
+             // Belt machines report belt speed in the writable TARGET_KPH field and never populate
+--- a/src/com/nettarion/hyperborea/hardware/fitpro/v2/V2Session.kt
++++ b/src/com/nettarion/hyperborea/hardware/fitpro/v2/V2Session.kt
+@@ -106,6 +106,7 @@
+                 logger.w(TAG, "Console never declared supported features — subscribing unfiltered")
+             }
+             declaredFeatures = supported
++            check(supported != null) { "No supported-feature list; refusing blind hardware initialization" }
+ 
+             // Identity (versions, part number, model name, serial) comes from the product-info
+             // field stream — queried between the features reply and subscribing, the order the
+@@ -118,6 +119,8 @@
+             // initial event after subscribing; the supported-feature-set heuristic covers
+             // consoles that don't implement it. transitionToWorkout() branches on this.
+             detectedDeviceType = resolveDeviceType(supported)
++            com.nordicrower.app.RowerProtocolGuard.requireV2(supported, _reportedDeviceType.value)
++            detectedDeviceType = DeviceType.ROWER
+ 
+             // One-shot bring-up config (heartbeat + idle-mode lock). After the type is resolved,
+             // because the idle-lock value the firmware requires depends on whether it's a belt machine.
+@@ -648,6 +651,10 @@
+     }
+ 
+     private fun applyEvent(feature: V2FeatureId, value: Float) {
++        if (!value.isFinite()) {
++            logger.w(TAG, "Ignoring non-finite $feature event")
++            return
++        }
+         when (feature) {
+             V2FeatureId.DEVICE_TYPE -> _reportedDeviceType.value = value
+             V2FeatureId.KEY_COOKED -> onKeypadCode(value.toInt())
+@@ -664,6 +671,8 @@
+             V2FeatureId.USER_WEIGHT_KG -> { /* echo of our own write — not exercise data */ }
+             V2FeatureId.FAN_STATE -> { /* console fan state — not exercise data */ }
+             V2FeatureId.WATTS -> accumulator.updatePower(value.toInt())
++            V2FeatureId.ROWER_TOTAL_STROKES -> accumulator.updateStrokeCount(value.toInt())
++            V2FeatureId.ROWER_STROKES_PER_MINUTE -> accumulator.updateStrokeRate(value.toInt())
+             V2FeatureId.RPM -> accumulator.updateCadence(value.toInt())
+             V2FeatureId.CURRENT_KPH -> {
+                 // Diagnostic: does this console actually report belt speed, and when? For Zwift
+--- a/src/com/nettarion/hyperborea/hardware/fitpro/transport/UsbHidTransport.kt
++++ b/src/com/nettarion/hyperborea/hardware/fitpro/transport/UsbHidTransport.kt
+@@ -79,7 +79,7 @@
+     /** The MCU intermittently refuses interface claims; keep asking like its own software does. */
+     private suspend fun claimInterfaceWithRetry() {
+         repeat(CLAIM_ATTEMPTS) { attempt ->
+-            if (connection.claimInterface(usbInterface, true)) {
++            if (connection.claimInterface(usbInterface, false)) {
+                 if (attempt > 0) logger.i(TAG, "Claimed USB interface after ${attempt + 1} attempts")
+                 return
+             }
+@@ -105,10 +105,11 @@
+                 val transferred = transferMutex.withLock {
+                     connection.bulkTransfer(outEndpoint, padded, padded.size, WRITE_TIMEOUT_MS)
+                 }
+-                if (transferred >= 0) {
++                if (transferred == padded.size) {
+                     if (attempts > 0) logger.i(TAG, "USB write succeeded after ${attempts + 1} attempts")
+                     return@withContext
+                 }
++                check(transferred <= 0) { "Partial USB write: $transferred/${padded.size}; refusing to replay packet" }
+                 attempts++
+                 if (attempts >= WRITE_MAX_ATTEMPTS) {
+                     // A controller that refuses an entire retry budget is in a state no software

@@ -44,5 +44,9 @@ install/
 
 # Helper prompts
 prompts/
+
+# Third-party source and reverse-engineering references
+**/vendor/
+**/references/
 # Sentry Config File
 sentry.properties

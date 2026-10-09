@@ -1,0 +1,50 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+if (!file('../vendor/hyperborea/LICENSE').exists()) {
+    throw new GradleException('Run bash setup-vendor.sh in nordicrower before building.')
+}
+
+def prepareLicense = tasks.register('prepareThirdPartyLicense', Copy) {
+    from('../vendor/hyperborea/LICENSE')
+    into(layout.buildDirectory.dir('generated/licenses'))
+    rename { 'Hyperborea-LICENSE.txt' }
+}
+
+android {
+    namespace 'com.nordicrower.app'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'com.nordicrower.app'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0-alpha.1'
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+    }
+    sourceSets {
+        main.java.srcDir '../vendor/hyperborea/src'
+        main.resources.srcDir '../vendor/hyperborea/resources'
+        main.assets.srcDir layout.buildDirectory.dir('generated/licenses')
+    }
+    buildFeatures { buildConfig true }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = '17' }
+    packagingOptions.resources.excludes += ['META-INF/AL2.0', 'META-INF/LGPL2.1']
+}
+
+tasks.named('preBuild').configure { dependsOn(prepareLicense) }
+
+dependencies {
+    implementation 'androidx.core:core:1.13.1'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+    androidTestImplementation 'androidx.test:runner:1.5.2'
+}
