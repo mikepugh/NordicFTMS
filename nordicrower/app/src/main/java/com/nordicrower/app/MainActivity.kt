@@ -6,6 +6,9 @@ import android.content.*
 import android.content.pm.PackageManager
 import android.hardware.usb.*
 import android.os.*
+import android.net.Uri
+import android.provider.Settings
+import android.view.View
 import android.widget.*
 import androidx.core.content.ContextCompat
 
@@ -14,14 +17,20 @@ class MainActivity : Activity() {
     private lateinit var metrics: TextView
     private lateinit var bluetooth: TextView
     private lateinit var inventory: TextView
+    private lateinit var preparation: TextView
     private lateinit var logs: TextView
     private lateinit var discovery: TextView
     private lateinit var connectButton: Button
     private lateinit var discoverButton: Button
     private lateinit var usb: UsbManager
+    private lateinit var usbRecoveryPanel: LinearLayout
+    private lateinit var usbRecoveryInstructions: TextView
+    private var usbRecoveryDialog: AlertDialog? = null
+    private var lastShownRecovery: UsbClaimRecovery? = null
     private val handler = Handler(Looper.getMainLooper())
     private var waitingDevice: UsbDevice? = null
     private var requestedAction = "connect"
+    private var lastInventoryAt = 0L
     private val refresh = object : Runnable {
         override fun run() {
             status.text = RowerLog.state
@@ -32,6 +41,8 @@ class MainActivity : Activity() {
             discoverButton.isEnabled = !RowerLog.busy
             discovery.text = discoverySummary()
             logs.text = RowerLog.recent()
+            showUsbRecovery()
+            if (SystemClock.elapsedRealtime() - lastInventoryAt >= 2000) showInventory()
             handler.postDelayed(this, 500)
         }
     }
@@ -60,8 +71,25 @@ class MainActivity : Activity() {
         text(26f).text = "NordicRower"
         text(14f).text = BuildConfig.VERSION_NAME
         status = text(19f).apply { this.text = RowerLog.state }
+        usbRecoveryPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            usbRecoveryInstructions = TextView(this@MainActivity).apply {
+                textSize = 18f; setPadding(0, 16, 0, 16)
+            }
+            addView(usbRecoveryInstructions)
+            addView(Button(this@MainActivity).apply {
+                text = "Réglages iFIT"; isAllCaps = false
+                setOnClickListener { openWolfSettings() }
+            })
+            addView(Button(this@MainActivity).apply {
+                text = "Réessayer"; isAllCaps = false
+                setOnClickListener { RowerLog.usbClaimRecovery?.let { requestAction(it.action) } }
+            })
+        }.also { layout.addView(it) }
         metrics = text(22f).apply { this.text = RowerLog.metrics }
         bluetooth = text()
+        preparation = text(18f)
         inventory = text()
         fun button(label: String, icon: Int, action: () -> Unit): Button {
             return Button(this).apply {
@@ -70,6 +98,7 @@ class MainActivity : Activity() {
                 setOnClickListener { action() }
             }.also { layout.addView(it) }
         }
+        button("Actualiser l'état du matériel", android.R.drawable.ic_popup_sync) { showInventory() }
         connectButton = button("Connecter le rameur", android.R.drawable.ic_media_play) { requestAction("connect") }
         button("Déconnecter", android.R.drawable.ic_media_pause) {
             startService(Intent(this, RowerService::class.java).setAction("stop"))
@@ -88,16 +117,81 @@ class MainActivity : Activity() {
     }
     override fun onResume() { super.onResume(); handler.post(refresh); showInventory() }
     override fun onPause() { handler.removeCallbacks(refresh); super.onPause() }
-    override fun onDestroy() { unregisterReceiver(permissionReceiver); super.onDestroy() }
+    override fun onDestroy() {
+        usbRecoveryDialog?.dismiss()
+        unregisterReceiver(permissionReceiver)
+        super.onDestroy()
+    }
+
+    private fun showUsbRecovery() {
+        val recovery = RowerLog.usbClaimRecovery
+        usbRecoveryPanel.visibility = if (recovery != null && !RowerLog.busy) View.VISIBLE else View.GONE
+        if (recovery == null) {
+            usbRecoveryDialog?.dismiss()
+            lastShownRecovery = null
+            return
+        }
+        usbRecoveryInstructions.text = recovery.instructions
+        if (RowerLog.busy || recovery === lastShownRecovery || isFinishing || isDestroyed) return
+        lastShownRecovery = recovery
+        val instructions = TextView(this).apply {
+            text = recovery.instructions
+            textSize = 18f
+            setPadding(32, 16, 32, 16)
+        }
+        usbRecoveryDialog = AlertDialog.Builder(this).setTitle(recovery.title)
+            .setView(ScrollView(this).apply { addView(instructions) })
+            .setPositiveButton("Réglages iFIT") { _, _ -> openWolfSettings() }
+            .setNeutralButton("Réessayer") { _, _ -> requestAction(recovery.action) }
+            .setNegativeButton("Plus tard", null).show()
+    }
+
+    private fun openWolfSettings() {
+        try {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:${UsbClaimRecovery.WOLF_PACKAGE}")))
+            RowerLog.i("Recovery", "Opened Wolf app details; user must choose Force stop manually")
+        } catch (e: Exception) {
+            RowerLog.e("Recovery", "Cannot open Wolf app details; manual Settings instructions remain visible", e)
+            AlertDialog.Builder(this).setTitle("Ouvrir les réglages manuellement")
+                .setMessage("Ouvrez Paramètres > Applications > iFIT/Wolf, puis appuyez sur « Forcer l'arrêt ». " +
+                    "Revenez ensuite à NordicRower et appuyez sur « Réessayer ».")
+                .setPositiveButton("Compris", null).show()
+        }
+    }
 
     private fun showInventory() {
+        lastInventoryAt = SystemClock.elapsedRealtime()
+        preparation.text = RowerHardware.readOwnership(this).summary
         inventory.text = usb.deviceList.values.joinToString("\n") {
             "USB VID=%04x PID=%04x, interfaces=%d, autorisé=%s".format(it.vendorId, it.productId,
                 it.interfaceCount, usb.hasPermission(it))
         }.ifEmpty { "Aucun contrôleur USB détecté" }
     }
     private fun requestAction(action: String) {
+        if (RowerLog.busy || waitingDevice != null) return
         requestedAction = action
+        showInventory()
+        val ownership = RowerHardware.readOwnership(this)
+        ownership.block?.let { block ->
+            RowerHardware.logInventory(usb)
+            RowerLog.state = block.message
+            RowerLog.w("Ownership", "PREFLIGHT_BLOCKED action=$action reason=${block.name} " +
+                "glassConsoleInstalled=${ownership.glassConsoleInstalled} wolfEnabled=${ownership.wolfEnabled}; " +
+                "no USB open or BLE start attempted")
+            if (action == "discover") {
+                val now = java.time.OffsetDateTime.now()
+                RowerLog.saveDiscovery("NordicRower ${BuildConfig.VERSION_NAME}\nDiscovery started=$now\n" +
+                    "STEP 1/6 $now Vérification de Wolf, des permissions et du matériel\n" +
+                    "PREFLIGHT_BLOCKED reason=${block.name}; no controller queries sent\n" +
+                    "DISCOVERY_INCOMPLETE ${block.message}; missing replies are UNKNOWN\n" +
+                    "Discovery ended=$now completed=false\n")
+            }
+            RowerLog.persistStatus()
+            AlertDialog.Builder(this).setTitle(block.message).setMessage(block.guidance)
+                .setPositiveButton("Compris", null).show()
+            return
+        }
         val permissions = if (action == "connect" && Build.VERSION.SDK_INT >= 31)
             arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_ADVERTISE) else emptyArray()
         if (permissions.any { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }) {
@@ -122,10 +216,11 @@ class MainActivity : Activity() {
         val action = requestedAction
         val probe = action == "discover"
         AlertDialog.Builder(this).setTitle(if (probe) "Rechercher les capacités du rameur ?" else "Connexion directe au rameur ?")
-            .setMessage(if (probe) "Laissez le rameur à l'arrêt. Wolf/iFIT doit être désactivé. " +
+            .setMessage(if (probe) "Laissez le rameur à l'arrêt. Wolf/iFIT peut rester activé. " +
                 "Le diagnostic lit les fonctions déclarées et les valeurs disponibles, sans changer la résistance, " +
                 "les watts cibles ou l'état de la séance. Un rapport sera enregistré automatiquement, même en cas d'échec."
-                else "Wolf/iFIT doit être désactivé. NordicRower prendra la connexion USB et initialisera une séance. " +
+                else "Wolf/iFIT peut rester activé. NordicRower essaiera l'accès USB et initialisera une séance. " +
+                    "Gardez NordicRower au premier plan pendant l'essai. Si l'interface USB est occupée, la connexion échouera. " +
                     "Aucune application ne sera désactivée automatiquement. Ce prototype n'est pas encore validé sur votre rameur.")
             .setNegativeButton("Annuler", null).setPositiveButton(if (probe) "Lancer le diagnostic" else "Connecter") { _, _ ->
                 startForegroundService(Intent(this, RowerService::class.java).setAction(action))

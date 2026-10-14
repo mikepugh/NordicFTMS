@@ -30,6 +30,8 @@ class RowerService : Service() {
             return START_NOT_STICKY
         }
         if (run?.isActive == true) return START_NOT_STICKY
+        RowerLog.usbClaimRecovery = null
+        RowerLog.persistStatus()
         RowerLog.busy = true
         val discoveryMode = intent?.action == "discover"
         RowerLog.discoveryRunning = discoveryMode
@@ -118,8 +120,15 @@ class RowerService : Service() {
                 RowerLog.e("Session", "Handshake timed out; BLE was not started if controller handshake failed", e)
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: RowerOwnershipException) {
+                RowerLog.state = e.block.message
+                RowerLog.w("Ownership", "PREFLIGHT_BLOCKED reason=${e.block.name}; no USB open or BLE start attempted")
             } catch (e: Exception) {
-                RowerLog.state = "Erreur : ${e.message}"
+                val recovery = UsbClaimRecovery.fromFailure(e, if (discoveryMode) "discover" else "connect")
+                RowerLog.usbClaimRecovery = recovery
+                RowerLog.state = recovery?.status ?: "Erreur : ${e.message}"
+                if (recovery != null) RowerLog.w("USB", "USB_CLAIM_FAILED action=${recovery.action}; " +
+                    "manual Wolf force-stop guidance offered; actual owner UNKNOWN; no package changes made")
                 RowerLog.e("Session", "Operation failed action=${if (discoveryMode) "discover" else "connect"}", e)
             } finally {
                 withContext(NonCancellable) { release() }
@@ -223,7 +232,10 @@ class RowerService : Service() {
         run?.cancelAndJoin()
         run = null
         release()
-        if (updateState) RowerLog.state = "À l'arrêt ; connexion USB libérée"
+        if (updateState) {
+            RowerLog.state = "À l'arrêt ; connexion USB libérée"
+            RowerLog.usbClaimRecovery = null
+        }
         RowerLog.busy = false
         RowerLog.discoveryRunning = false
         RowerLog.persistStatus()

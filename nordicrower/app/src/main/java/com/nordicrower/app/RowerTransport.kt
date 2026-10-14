@@ -3,6 +3,7 @@ package com.nordicrower.app
 import com.nettarion.hyperborea.hardware.fitpro.transport.HidTransport
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.CancellationException
 
 /** Log transport shape/timing, not raw identity, security or telemetry payloads. */
 class RowerTransport(private val delegate: HidTransport, private val productId: Int) : HidTransport {
@@ -11,7 +12,18 @@ class RowerTransport(private val delegate: HidTransport, private val productId: 
     private var timeouts = 0L
     private var lastSummary = 0L
     override val isOpen get() = delegate.isOpen
-    override suspend fun open() = delegate.open()
+    override suspend fun open() {
+        try {
+            delegate.open()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: IllegalStateException) {
+            // The pinned Hyperborea transport uses this error only after all normal claims fail.
+            if (Regex("Failed to claim USB interface after [1-9][0-9]* attempts").matches(e.message.orEmpty()))
+                throw UsbClaimException(e)
+            throw e
+        }
+    }
     override suspend fun clearBuffer() = delegate.clearBuffer()
     override suspend fun write(data: ByteArray) {
         val started = System.nanoTime()

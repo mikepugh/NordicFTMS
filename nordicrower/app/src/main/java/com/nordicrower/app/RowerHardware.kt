@@ -17,26 +17,37 @@ object RowerHardware {
     const val VENDOR = 0x213c
     val PRODUCTS = setOf(2, 3, 4)
 
-    fun checkExclusiveMode(context: Context) {
+    fun readOwnership(context: Context): RowerOwnership {
         val pm = context.packageManager
         val glassConsoleInstalled = try {
             pm.getApplicationInfo("com.ifit.mithlond", 0)
             true
         } catch (_: PackageManager.NameNotFoundException) { false }
-        check(!glassConsoleInstalled) { "GlassOS console detected. NordicRower is not for this treadmill/bike setup." }
         val wolf = try { pm.getApplicationInfo("com.ifit.standalone", 0) }
             catch (_: PackageManager.NameNotFoundException) { null }
-        check(wolf == null || !wolf.enabled) {
-            "Wolf/iFIT is enabled. Release its controller ownership before using NordicRower. No settings were changed."
-        }
+        return RowerOwnership(glassConsoleInstalled, wolf?.enabled)
+    }
+
+    fun checkExclusiveMode(context: Context) {
+        val ownership = readOwnership(context)
+        RowerLog.i("Ownership", "glassConsoleInstalled=${ownership.glassConsoleInstalled} " +
+            "wolfInstalled=${ownership.wolfEnabled != null} wolfEnabled=${ownership.wolfEnabled} " +
+            "block=${ownership.block?.name ?: "NONE"}; USB ownership has not been tested")
         val usb = context.getSystemService(UsbManager::class.java)
+        logInventory(usb)
+        // Retain inventory even when package state prevents opening the controller.
+        ownership.block?.let { throw RowerOwnershipException(it) }
+        val devices = usb.deviceList.values.filter { it.vendorId == VENDOR && it.productId in PRODUCTS }
+        check(devices.size == 1) { "Expected one FitPro USB controller; found ${devices.size}" }
+        check(usb.hasPermission(devices.single())) { "USB access was not granted" }
+    }
+
+    fun logInventory(usb: UsbManager) {
         usb.deviceList.values.forEach {
             RowerLog.i("Inventory", "USB VID=%04x PID=%04x interfaces=%d permission=%s".format(
                 it.vendorId, it.productId, it.interfaceCount, usb.hasPermission(it)))
         }
-        val devices = usb.deviceList.values.filter { it.vendorId == VENDOR && it.productId in PRODUCTS }
-        check(devices.size == 1) { "Expected one FitPro USB controller; found ${devices.size}" }
-        check(usb.hasPermission(devices.single())) { "USB access was not granted" }
+        if (usb.deviceList.isEmpty()) RowerLog.i("Inventory", "No USB devices detected")
     }
 
     fun createTransport(context: Context): HidTransportResult {
@@ -56,13 +67,14 @@ object RowerHardware {
         try {
             session.start()
             val status = session.sessionState.value
+            if (status is SessionState.Error) throw IllegalStateException(status.message, status.cause)
             check(status is SessionState.Streaming) {
-                (status as? SessionState.Error)?.message ?: "Controller handshake did not complete"
+                "Controller handshake did not complete"
             }
             return session
         } catch (e: Exception) {
             // Failed rower validation must release USB without invoking workout teardown writes.
-            result.transport.close()
+            try { result.transport.close() } catch (closeError: Exception) { e.addSuppressed(closeError) }
             throw e
         }
     }

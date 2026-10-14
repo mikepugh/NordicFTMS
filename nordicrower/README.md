@@ -1,7 +1,7 @@
 # NordicRower
 
 Independent experimental Android app: `com.nordicrower.app`, version
-`0.1.0-alpha.2`. It does not modify, extend, or depend on NordicFTMS/GlassOS.
+`0.1.0-alpha.3`. It does not modify, extend, or depend on NordicFTMS/GlassOS.
 
 ## Current Prototype
 
@@ -48,18 +48,24 @@ belong in Git. See [dependency notes](docs/hyperborea-dependency.md).
 
 ## Hardware Ownership
 
-NordicRower is a replacement controller client, not a cooperative background
-bridge. It refuses normal connection while Wolf is enabled, and refuses a
-GlassOS/Mithlond console. It never disables or uninstalls iFIT itself, requests
-root, alters launcher settings, flashes firmware, or forcibly claims an occupied
-USB interface. Connecting requires a visible user confirmation and USB access.
+Alpha.3 permits both discovery and streaming while Wolf/iFIT remains enabled.
+Keep NordicRower in the foreground during the trial. Wolf package state is
+logged for diagnostics; it is not proof of USB ownership. NordicRower uses
+normal USB interface claims without forcing access. If another client actually
+holds the interface, connection can still fail with a logged claim error.
+Concurrent operation and controller behavior remain unverified on the rower.
+An exhausted USB claim opens a French recovery guide with a button to Wolf's
+Android app settings. The user can choose Force stop there, return and retry
+the failed connection or discovery. Instructions remain visible and are
+restored after app restarts until another attempt or an explicit disconnect.
 
-Prepare a tested rollback before any customer hardware trial: preserve Wolf's
-installed APK, use reversible Android package disable/enable rather than
-uninstalling system software, release NordicRower's session before restoring
-Wolf, and power-cycle only if a controller fails to release normally. Do not
-disable unrelated iFIT/ERU packages without evidence they interfere. No takeover
-commands have been executed on the local treadmill or customer's equipment.
+The app still rejects a GlassOS/Mithlond console. It never disables or uninstalls
+iFIT itself, requests root, alters launcher settings, or flashes firmware.
+Connecting requires a visible user confirmation and USB access. Preserve Wolf's
+installed APK before a customer trial and disconnect NordicRower at the end.
+No package disable/enable commands are required for the default alpha.3 trial.
+No takeover commands have been executed on the local treadmill or customer's
+equipment.
 
 ## App Handshake Research
 
@@ -94,5 +100,5 @@ Run-as relies on the experimental APK being debuggable; other build types may
 deny it. Collect before uninstalling or clearing app data. Reports are private
 support material and system dumps may contain incidental identifiers.
 
-See [experimental installation notes](../experimental/NordicRower-0.1.0-alpha.2.md)
+See [experimental installation notes](../experimental/NordicRower-0.1.0-alpha.3.md)
 for the test package, reversible setup, and validation limits.

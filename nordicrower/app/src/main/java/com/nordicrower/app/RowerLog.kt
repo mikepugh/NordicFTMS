@@ -22,6 +22,7 @@ object RowerLog : AppLogger {
     @Volatile var discovery = "Aucune recherche effectuée"
     @Volatile var busy = false
     @Volatile var discoveryRunning = false
+    @Volatile var usbClaimRecovery: UsbClaimRecovery? = null
     private var journal: DiagnosticJournal? = null
     private val runId = UUID.randomUUID().toString().take(8)
 
@@ -30,6 +31,10 @@ object RowerLog : AppLogger {
         try {
             journal = DiagnosticJournal(File(context.filesDir, "diagnostics"))
             discovery = journal!!.read("discovery.txt").ifEmpty { discovery }
+            val recoveryAction = journal!!.read("status.txt").lineSequence()
+                .firstOrNull { it.startsWith("USB_RECOVERY_ACTION=") }?.substringAfter('=')
+            usbClaimRecovery = UsbClaimRecovery.fromAction(recoveryAction)
+            usbClaimRecovery?.let { state = it.status }
         } catch (e: Exception) { Log.e("NordicRower", "Persistent diagnostics unavailable", e) }
         i("Application", "run=$runId version=${BuildConfig.VERSION_NAME} code=${BuildConfig.VERSION_CODE} " +
             "Android=${Build.VERSION.RELEASE} SDK=${Build.VERSION.SDK_INT} " +
@@ -56,6 +61,7 @@ object RowerLog : AppLogger {
     override fun w(tag: String, message: String) = add("WARN", tag, message)
     override fun e(tag: String, message: String, throwable: Throwable?) = add("ERROR", tag, message, throwable)
     @Synchronized private fun status() = "NordicRower ${BuildConfig.VERSION_NAME}; run=$runId\nState: $state\n$metrics\n" +
+        "USB_RECOVERY_ACTION=${usbClaimRecovery?.action ?: "NONE"}\n" +
         "BLE clients=$clients; queued=$notifications; completed=$delivered; errors=$notificationErrors\n" +
         "Notification completion does not prove the receiving app interpreted the data.\n"
     @Synchronized fun persistStatus() {

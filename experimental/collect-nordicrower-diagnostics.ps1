@@ -133,6 +133,9 @@ try {
     Save-Read -Name 'package.txt' -Arguments @('shell', 'dumpsys', '-t', '10', 'package', 'com.nordicrower.app')
     Save-Read -Name 'service.txt' -Arguments @('shell', 'dumpsys', '-t', '10', 'activity', 'services', 'com.nordicrower.app')
     Save-Read -Name 'wolf-enabled.txt' -Arguments @('shell', 'pm', 'list', 'packages', '-e', 'com.ifit.standalone')
+    Save-Read -Name 'wolf-disabled.txt' -Arguments @('shell', 'pm', 'list', 'packages', '-d', 'com.ifit.standalone')
+    Save-Read -Name 'wolf-package.txt' -Arguments @('shell', 'dumpsys', '-t', '10', 'package', 'com.ifit.standalone')
+    Save-Read -Name 'wolf-services.txt' -Arguments @('shell', 'dumpsys', '-t', '10', 'activity', 'services', 'com.ifit.standalone')
     Save-Read -Name 'android.txt' -Arguments @('shell', 'getprop', 'ro.build.fingerprint')
     Save-Read -Name 'console-time.txt' -Arguments @('shell', 'date')
 } catch {
@@ -141,7 +144,7 @@ try {
     Write-Warning 'Collecte incomplete ; le rapport partiel reste utile.'
 }
 $summary = @"
-NordicRower diagnostic collector v1
+NordicRower diagnostic collector v2
 PC time: $((Get-Date).ToString('o'))
 Unavailable/failed reads: $failed (old rotated journals may legitimately not exist)
 No Android settings/apps/logs/controller targets were changed. No automatic upload.
@@ -150,6 +153,7 @@ discovery.txt: feature declarations, firmware identity, resistance limits, curre
 journal*.txt: persistent app history across restarts (bounded to roughly 3 MiB).
 status.txt: last saved session state, telemetry and BLE notification counters (not guaranteed current after a crash).
 logcat/crash/dumps: recent system state, may contain incidental personal data from other apps/devices.
+wolf-enabled/disabled/package/services: package state and service evidence; enabled or USB permission alone does NOT prove interface ownership.
 DECLARED_NOT_WRITE_TESTED: candidate feature, NOT proof of write acceptance or native ERG operation.
 NOT_DECLARED: absent from a complete feature list; UNKNOWN: missing/incomplete reply, never assume unsupported.
 Bluetooth notification completion does not prove EXR/RowerTrain interpreted the rower data.
