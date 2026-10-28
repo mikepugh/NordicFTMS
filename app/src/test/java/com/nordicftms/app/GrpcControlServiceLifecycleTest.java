@@ -18,6 +18,25 @@ import static org.junit.Assert.*;
 
 public class GrpcControlServiceLifecycleTest {
     @Test
+    public void rscDistanceWaitsForACurrentSampleAfterReconnect() throws Exception {
+        GrpcControlService service = createService();
+        try {
+            field("connected").setBoolean(service, true);
+            field("cachedDistanceKm").setDouble(service, 2.5);
+            assertTrue(Double.isNaN(service.getCurrentDistanceKm()));
+            field("lastDistanceKm").setDouble(service, 2.5);
+            field("hasCurrentDistanceMeasurement").setBoolean(service, true);
+            assertEquals(2.5, service.getCurrentDistanceKm(), 0);
+            disconnectForRetry(service);
+            assertTrue(Double.isNaN(service.getCurrentDistanceKm()));
+            field("connected").setBoolean(service, true);
+            assertTrue(Double.isNaN(service.getCurrentDistanceKm()));
+        } finally {
+            stopExecutor(service);
+        }
+    }
+
+    @Test
     public void cachedInfoCannotMakeANewEndpointReady() throws Exception {
         GrpcControlService service = createService();
         try {

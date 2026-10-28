@@ -18,6 +18,22 @@ public class GattServiceRegistrationCoordinatorTest {
             UUID.fromString("00001826-0000-1000-8000-00805F9B34FB");
 
     @Test
+    public void dualProtocolStartupWaitsForAllThreeServices() {
+        GattServiceRegistrationCoordinator coordinator = new GattServiceRegistrationCoordinator();
+        long generation = coordinator.begin(Arrays.asList(
+                FTMS_UUID, PeripheralIdentity.SERVICE_UUID, RunningSpeedCadence.SERVICE_UUID));
+        assertEquals(FTMS_UUID, coordinator.claimNext(generation));
+        assertEquals(GattServiceRegistrationCoordinator.CompletionResult.NEXT,
+                coordinator.complete(generation, FTMS_UUID, true));
+        assertEquals(PeripheralIdentity.SERVICE_UUID, coordinator.claimNext(generation));
+        assertEquals(GattServiceRegistrationCoordinator.CompletionResult.NEXT,
+                coordinator.complete(generation, PeripheralIdentity.SERVICE_UUID, true));
+        assertEquals(RunningSpeedCadence.SERVICE_UUID, coordinator.claimNext(generation));
+        assertEquals(GattServiceRegistrationCoordinator.CompletionResult.COMPLETE,
+                coordinator.complete(generation, RunningSpeedCadence.SERVICE_UUID, true));
+    }
+
+    @Test
     public void registersServicesOneAtATime() {
         GattServiceRegistrationCoordinator coordinator =
                 new GattServiceRegistrationCoordinator();

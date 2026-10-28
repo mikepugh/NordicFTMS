@@ -112,6 +112,7 @@ public class GrpcControlService {
     private volatile double lastSpeedKph = 0;
     private volatile double lastInclinePercent = 0;
     private volatile double lastDistanceKm = 0;
+    private volatile boolean hasCurrentDistanceMeasurement = false;
     private volatile double lastResistance = 0;
     private volatile double lastCadenceRpm = 0;
     private volatile double lastWatts = 0;
@@ -897,6 +898,7 @@ public class GrpcControlService {
                 if (generation != activeGeneration) return;
                 lastDistanceKm = data.getLastDistanceKm();
                 cachedDistanceKm = lastDistanceKm;
+                hasCurrentDistanceMeasurement = true;
                 logger.debug(appContext, "distance_subscription_update",
                         "Distance: " + lastDistanceKm + " km (" + (int) (lastDistanceKm * 1000) + " m)");
             }
@@ -1105,6 +1107,12 @@ public class GrpcControlService {
     public double getLastInclinePercent() { return connected ? lastInclinePercent : cachedInclinePercent; }
 
     public double getLastDistanceKm() { return connected ? lastDistanceKm : cachedDistanceKm; }
+
+    // RSC must distinguish the initial placeholder zero from an actual workout
+    // reset, otherwise reconnecting could count the previous distance twice.
+    public double getCurrentDistanceKm() {
+        return connected && hasCurrentDistanceMeasurement ? lastDistanceKm : Double.NaN;
+    }
 
     public double getLastResistance() { return connected ? lastResistance : cachedResistance; }
 
@@ -1374,6 +1382,7 @@ public class GrpcControlService {
         workoutAsyncStub = null;
 
         connected = false;
+        hasCurrentDistanceMeasurement = false;
         advancedSubscriptionsStarted = false;
         consoleInfoSubscriptionStarted = false;
         consoleInfo = null;

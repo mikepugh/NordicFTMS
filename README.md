@@ -1,6 +1,6 @@
 # NordicFTMS
 
-**BLE FTMS and DIRCON server for NordicTrack and ProForm fitness equipment.**
+**BLE FTMS, Running Speed and Cadence (RSC), and DIRCON server for NordicTrack and ProForm fitness equipment.**
 
 NordicFTMS is an Android app that runs on your iFit-enabled treadmill, bike, elliptical, or rower and exposes it as a standard Bluetooth FTMS (Fitness Machine Service) device. It can also expose compatible equipment over Wahoo DIRCON on your local network. Any FTMS-compatible app — [PowerTread](https://powertread.fit/), Zwift, Kinomap, and others — can connect over Bluetooth, and supported treadmill apps can also connect over Wi-Fi through DIRCON.
 
@@ -20,6 +20,7 @@ NordicFTMS communicates with the machine hardware through the GlassOS gRPC inter
 
 - **Zero configuration** — auto-starts on boot, auto-detects machine type (treadmill, bike, elliptical, rower)
 - **Standard BLE FTMS protocol** — works with any FTMS-compatible app
+- **RSC treadmill sensor** — advertises running speed and distance alongside FTMS for compatible Bluetooth foot-pod clients
 - **DIRCON treadmill support** — supported treadmills can be discovered over Wi-Fi by apps that support Wahoo Direct Connect
 - **Bidirectional control** — read metrics AND control incline/resistance from your phone
 - **Runs silently in background** — no user interaction needed after initial installls
@@ -59,6 +60,39 @@ In practice, that means:
 | Incline (%) | Cadence (RPM) |
 | Distance (m) | Resistance Level |
 | | Power (watts) |
+
+## Running Speed and Cadence (RSC)
+
+Detected treadmills and incline trainers advertise both FTMS (`0x1826`) and
+Running Speed and Cadence (`0x1814`) in one `NordicFTMS` advertisement and GATT
+server. RSC is enabled automatically; bikes, ellipticals, and rowers keep their
+existing FTMS behavior. An RSC client
+and an FTMS app can subscribe independently, subject to the console's Bluetooth
+connection limits.
+
+On a watch that supports Bluetooth RSC foot pods, try adding `NordicFTMS` from
+the watch's sensor menu as a **Foot Pod** (or use **Search All**), then use it for
+an indoor/treadmill activity. If the watch offers speed and distance source
+settings, select the foot pod for indoor use. Exact menus vary by model and
+firmware. Garmin compatibility is not guaranteed: an epix Gen 2 running 26.09
+did not discover the test console. Android manages the console's BLE addresses,
+which may affect client compatibility.
+
+RSC sends belt speed and cumulative distance. The mandatory cadence field is
+zero because NordicFTMS has no measured treadmill footfall cadence. Stride
+length, walking/running detection, and sensor calibration are not advertised.
+A watch may display zero cadence when using this sensor; use another source
+for cadence if needed. RSC cannot control speed or incline.
+
+The RSC distance counter follows increases in the console's distance, continues
+across console workout resets, and lasts for the lifetime of the Android
+service. It is separate from FTMS workout distance. The RSC **Set Cumulative
+Value** procedure can reset or set this sensor counter without changing the
+console, FTMS, or DIRCON session. RSC clients should use distance differences
+relative to the beginning of their activity.
+
+For protocol details and a hardware validation checklist, see
+[RSC treadmill support](docs/running-speed-and-cadence.md).
 
 ## Installation
 
