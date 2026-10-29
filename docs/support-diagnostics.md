@@ -197,9 +197,27 @@ collection. It also retains name-matching recent main/system and lifecycle logs
 to help identify failures from already-exited processes, plus a bounded crash
 buffer without filtering away native/Java stack context.
 
-Limits are explicit: up to 32 PIDs, logcat `-t 1500` per PID capture, `-t 8000`
-for filtered main/system logs, `-t 3000` for filtered lifecycle events, and
-`-t 500` for crashes. These are bounded snapshots, not complete startup history.
+For a backend investigation, collect while stock iFit is open and has finished
+its normal startup, and record whether iFit itself can read/control the equipment
+during normal use. Compare with a report from a working console, especially its
+Android build, installed iFit package versions, service state, and transport.
+Package names and treadmill model year alone do not identify the backend API.
+If a startup dependency is suspected, compare captures from the relevant iFit UI
+states without starting a workout or changing equipment settings for collection.
+
+Collector v2 supports older Android command variants: process inventory falls
+back to plain `ps`, and package inventory retries without `pm`'s `-U` option when
+the output cannot be parsed. This matters on Android 5.1.1, where an unsupported
+command can appear to succeed through older ADB shell implementations. Portable
+`dumpsys` commands use the collector's existing PC-side timeout.
+
+Limits are explicit: up to 32 PIDs, logcat `-t 1500` per PID capture when native
+`--pid` filtering is advertised, `-t 8000` for filtered main/system logs,
+`-t 3000` for filtered lifecycle events, and `-t 500` for crashes. Without
+`--pid`, each snapshot that identifies new PIDs instead reads the latest 8000
+global main/system records and retains matching threadtime PIDs and their
+continuation lines on the PC. Busy buffers can therefore leave fewer records
+for each process. These are bounded snapshots, not complete startup history.
 Unknown backend names, PID reuse, shared UIDs and Android access restrictions
 can affect coverage/attribution. Normal logs from an already-exited PID are not
 fully recovered just because a lifecycle event names it. A process/socket name

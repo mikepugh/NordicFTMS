@@ -100,14 +100,41 @@ function Write-Report {
     $reportWriter.Flush()
 }
 
+function Select-ProcessLogLines {
+    param([string]$Text, [string[]]$ProcessIds)
+    $selected = @{}
+    foreach ($processId in $ProcessIds) { $selected[$processId] = $true }
+    $keepRecord = $false
+    $threadtimePrefix = '^(?:\d{4}-)?\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+'
+    foreach ($line in ($Text -split '\r?\n')) {
+        # threadtime identifies the emitting PID before the TID and priority.
+        if ($line -match ($threadtimePrefix + '\s+(\d+)\s+\d+\s+[VDIWEFAS]\s')) {
+            $keepRecord = $selected.ContainsKey($Matches[1])
+        } elseif ($line -match '^---------' -or $line -match $threadtimePrefix) {
+            # Never attach an unrecognized timestamped record to the prior PID.
+            $keepRecord = $false
+        }
+        # Retain unprefixed continuation lines only for the selected record.
+        if ($keepRecord) { $line }
+    }
+}
+
 function Read-Device {
-    param([string[]]$Arguments, [switch]$FilterRelevant)
+    param([string[]]$Arguments, [switch]$FilterRelevant, [string[]]$ProcessIds)
     $result = Invoke-AdbRead -Arguments (@('-s', $Serial) + $Arguments)
     Write-Report "`r`n=== $($Arguments -join ' ') ==="
     Write-Report "Captured: $($result.At); exit=$($result.ExitCode); timed_out=$($result.TimedOut)"
-    if ($FilterRelevant) {
-        $lines = @($result.Output -split '\r?\n' | Where-Object { $_ -match $relevantLogs })
-        Write-Report 'Only lines matching backend/app names or gRPC are retained in this section.'
+    if ($ProcessIds -and $ProcessIds.Count) {
+        $lines = @(Select-ProcessLogLines -Text $result.Output -ProcessIds $ProcessIds)
+        Write-Report "Only threadtime records for PIDs $($ProcessIds -join ', ') and their continuation lines are retained."
+        if ($lines.Count) { Write-Report ($lines -join "`r`n") }
+        else { Write-Report '(No attributable PID records in this bounded snapshot; this is not proof of no app logs.)' }
+    } elseif ($FilterRelevant) {
+        # Legacy adb shell can merge remote stderr into stdout and return exit 0.
+        $lines = @($result.Output -split '\r?\n' | Where-Object {
+            $_ -match $relevantLogs -or $_ -match '^(?i:Error:|Usage:|(?:/system/bin/sh|sh|pm|logcat|dumpsys):)'
+        })
+        Write-Report 'Only backend/app names, gRPC, and command error lines are retained in this section.'
         if ($lines.Count) { Write-Report ($lines -join "`r`n") }
         else { Write-Report '(No matching lines in this bounded snapshot.)' }
     } else {
@@ -147,6 +174,11 @@ function Get-ProcessSnapshot {
     $rows = @(Get-ProcessRows $snapshot.Output)
     if ($snapshot.ExitCode -ne 0 -or -not $rows.Count) {
         $snapshot = Read-Device -Arguments @('shell', 'ps', '-A')
+        $rows = @(Get-ProcessRows $snapshot.Output)
+    }
+    if ($snapshot.ExitCode -ne 0 -or -not $rows.Count) {
+        # Android 5 toolbox ps treats unsupported -A/-o tokens as name filters.
+        $snapshot = Read-Device -Arguments @('shell', 'ps')
         $rows = @(Get-ProcessRows $snapshot.Output)
     }
     if (-not $rows.Count) {
@@ -193,7 +225,7 @@ $reportWriter = New-Object System.IO.StreamWriter($reportPath, $false, (New-Obje
 
 try {
     Write-Host 'Reading diagnostics. Leave iFIT enabled and the equipment idle. No retry button needed.'
-    Write-Report "NordicFTMS read-only collector v1`r`nPC time: $((Get-Date).ToString('o'))"
+    Write-Report "NordicFTMS read-only collector v2`r`nPC time: $((Get-Date).ToString('o'))"
     Write-Report 'Private support report. Review before sharing. No automatic upload or redaction.'
     Write-Report 'Only Android reads are performed. Process names/UIDs are clues, not verified backend identities.'
     Write-Report 'Log buffers are finite. Old logs, unsupported commands and access restrictions can leave gaps.'
@@ -201,13 +233,18 @@ try {
     [void](Read-Device -Arguments @('shell', 'date'))
 
     $packageResult = Read-Device -Arguments @('shell', 'pm', 'list', 'packages', '-U') -FilterRelevant
-    if ($packageResult.ExitCode -ne 0) {
+    $packageLinePattern = '^package:([A-Za-z0-9_.]+)(?:\s+uid:(\d+))?\s*$'
+    $packageLines = @($packageResult.Output -split '\r?\n' | Where-Object { $_ -match $packageLinePattern })
+    if ($packageResult.ExitCode -ne 0 -or $packageResult.TimedOut -or -not $packageLines.Count) {
+        Write-Report 'Package listing with UIDs unavailable or unparseable; retrying without -U for older Android.'
         $packageResult = Read-Device -Arguments @('shell', 'pm', 'list', 'packages') -FilterRelevant
+        $packageLines = @($packageResult.Output -split '\r?\n' | Where-Object { $_ -match $packageLinePattern })
     }
+    if (-not $packageLines.Count) { Write-Report 'Package inventory could not be parsed; do not infer that backend packages are absent.' }
     $packages = @()
     $appUids = @{}
-    foreach ($line in ($packageResult.Output -split '\r?\n')) {
-        if ($line -match '^package:([A-Za-z0-9_.]+)(?:\s+uid:(\d+))?\s*$') {
+    foreach ($line in $packageLines) {
+        if ($line -match $packageLinePattern) {
             $packageName = $Matches[1]
             $packageUid = $Matches[2]
             if ($packageName -match $relevantNames) {
@@ -220,12 +257,25 @@ try {
     $packages = @($packages | Sort-Object -Unique)
     Write-Report "Matched packages: $($packages -join ', ')"
 
+    $logcatHelp = Read-Device -Arguments @('logcat', '--help')
+    $supportsLogcatPid = ($logcatHelp.Output + "`n" + $logcatHelp.Error) -match '(?m)^\s*--pid(?:[=\s]|$)'
+    if (-not $supportsLogcatPid) {
+        Write-Report 'logcat --pid is not advertised. PID logs will be filtered on this PC from the last 8000 global main/system records per snapshot, not 1500 records per PID. Busy buffers or an unrecognized format can leave gaps.'
+    }
+
     # Capture app logs early, before slower service dumps can age them out.
     $capturedPids = @{}
     for ($pass = 1; $pass -le 2; $pass++) {
         Write-Host "Reading process logs (snapshot $pass of 2)..."
         $processes = @(Get-ProcessSnapshot)
+        # Older pm cannot list UIDs; use observed named app processes as well.
+        foreach ($processRow in $processes) {
+            if ($processRow.Name -match $relevantNames -and $processRow.Uid -match '^\d+$' -and [long]$processRow.Uid -ge 10000) {
+                $appUids[$processRow.Uid] = $true
+            }
+        }
         $targets = @($processes | Where-Object { $_.Name -match $relevantNames -or $appUids.ContainsKey($_.Uid) })
+        $newProcessIds = @()
         foreach ($target in $targets) {
             if ($capturedPids.ContainsKey($target.ProcessId)) { continue }
             if ($capturedPids.Count -ge 32) {
@@ -233,9 +283,15 @@ try {
                 break
             }
             $capturedPids[$target.ProcessId] = $true
+            $newProcessIds += $target.ProcessId
             Write-Report "`r`nPROCESS LOG: pid=$($target.ProcessId); uid=$($target.Uid); name=$($target.Name)"
-            Write-Report 'Bounded logcat snapshot (-t 1500) filtered by PID, all tags/priorities, main and system buffers.'
-            [void](Read-Device -Arguments @('logcat', '-d', '-b', 'main', '-b', 'system', '-v', 'threadtime', '-t', '1500', "--pid=$($target.ProcessId)", '*:V'))
+            if ($supportsLogcatPid) {
+                Write-Report 'Bounded logcat snapshot (-t 1500) filtered by PID, all tags/priorities, main and system buffers.'
+                [void](Read-Device -Arguments @('logcat', '-d', '-b', 'main', '-b', 'system', '-v', 'threadtime', '-t', '1500', "--pid=$($target.ProcessId)", '*:V'))
+            }
+        }
+        if (-not $supportsLogcatPid -and $newProcessIds.Count) {
+            [void](Read-Device -Arguments @('logcat', '-d', '-b', 'main', '-b', 'system', '-v', 'threadtime', '-t', '8000', '*:V') -ProcessIds $newProcessIds)
         }
     }
     if (-not $capturedPids.Count) { Write-Report 'No matching running PIDs identified. This does not prove the backend is absent.' }
@@ -261,8 +317,9 @@ try {
     }
     foreach ($package in $packages) {
         Write-Host "Reading package and service details: $package"
-        [void](Read-Device -Arguments @('shell', 'dumpsys', '-t', '10', 'package', $package))
-        [void](Read-Device -Arguments @('shell', 'dumpsys', '-t', '10', 'activity', 'services', $package))
+        # Use the portable command form; Invoke-AdbRead still bounds every read.
+        [void](Read-Device -Arguments @('shell', 'dumpsys', 'package', $package))
+        [void](Read-Device -Arguments @('shell', 'dumpsys', 'activity', 'services', $package))
     }
     Write-Report "`r`nCollection completed: $((Get-Date).ToString('o')); unavailable/failed commands: $failedCommands"
 } catch {
