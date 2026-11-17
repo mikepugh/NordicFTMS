@@ -6,8 +6,10 @@ autre appareil. Son nom Bluetooth est **NordicRower**. Laissez NordicRower au
 premier plan sur la console pendant la séance.
 
 Cette application est distincte de NordicFTMS. Les mesures locales sont
-confirmées sur un rameur Wolf/iFIT ; la compatibilité avec les applications
-réceptrices reste à valider. Les vélos (dont le S15i) et les consoles GlassOS
+confirmées sur un rameur Wolf/iFIT. Une capture RowerTrain montre également
+NordicRower avec le statut **Connecté**. L'affichage des mesures et leur
+enregistrement dans RowerTrain, ainsi que la compatibilité avec d'autres
+applications réceptrices, restent à valider. Les vélos (dont le S15i) et les consoles GlassOS
 ne sont pas pris en charge. Cette version ne propose ni commande à distance
 de la résistance, ni ERG, vitesse, distance ou allure. Les applications qui
 exigent un point de contrôle FTMS ne sont pas compatibles.

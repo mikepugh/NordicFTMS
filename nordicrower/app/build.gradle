@@ -3,7 +3,7 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
-def rowerVersion = providers.gradleProperty('VERSION_NAME').getOrElse('0.1.0')
+def rowerVersion = providers.gradleProperty('VERSION_NAME').getOrElse('1.0.0')
 def versionMatch = rowerVersion =~ /^(\d+)\.(\d+)\.(\d+)$/
 if (!versionMatch.matches()) throw new GradleException('NordicRower VERSION_NAME must be major.minor.patch')
 def (major, minor, patch) = (1..3).collect { versionMatch.group(it).toInteger() }

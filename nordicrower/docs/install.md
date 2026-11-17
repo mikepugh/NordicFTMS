@@ -7,8 +7,10 @@ Bluetooth FTMS under the name **NordicRower**. Keep it in the foreground.
 This is a separate app from NordicFTMS. Install it on the rower's Android
 console, and run your receiving app on a separate phone, tablet or computer.
 It does not support bikes (including the S15i) or GlassOS consoles. Current
-customer evidence confirms local readings on one Wolf/iFIT rower; receiving-app
-compatibility is still being validated. Apps requiring an FTMS Control Point
+customer evidence confirms local readings on one Wolf/iFIT rower and discovery/
+connection in RowerTrain. Live measurements and recording inside RowerTrain,
+and compatibility with other receiving apps, are still being validated.
+Apps requiring an FTMS Control Point
 are not supported. Remote resistance, ERG, speed, distance and pace are not
 provided by this release.
 

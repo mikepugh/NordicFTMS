@@ -3,7 +3,7 @@
 **Bluetooth rowing measurements for compatible NordicTrack/ProForm Wolf/iFIT USB consoles.**
 
 NordicRower is an independent Android app (`com.nordicrower.app`, version
-**0.1.0**). It reads real power, stroke rate and stroke count directly from a
+**1.0.0**). It reads real power, stroke rate and stroke count directly from a
 FitPro USB controller and offers those measurements as a Bluetooth FTMS rower
 named **NordicRower**. Keep the app in the foreground during workouts.
 
@@ -29,8 +29,12 @@ and 97 W / 23 / 4. They show USB VID 213c/PID 0002 with access granted while
 Wolf/iFIT is enabled. This confirms local USB telemetry, not which claim path
 succeeded or interference-free concurrent operation.
 
-Both screenshots show zero Bluetooth clients and zero notifications. Reception
-in EXR, RowerTrain or another app still needs an end-to-end customer test.
+Those console screenshots show zero Bluetooth clients and zero notifications.
+A separate customer screenshot shows **NordicRower** listed in **RowerTrain**
+with the status **Connecté**. This confirms discovery and an app-reported
+Bluetooth connection in that setup. The RowerTrain screen does not show workout
+measurements, so live power/stroke reception and recording still need validation.
+EXR and other receiving apps remain unverified.
 Long sessions, reconnect behavior and other console/firmware variants are not
 fully validated. This initial public release has a deliberately narrow scope.
 
@@ -81,13 +85,13 @@ and [QZ research](docs/qz-oct27-findings.md). No QZ source is bundled.
 
 ## Independent releases
 
-Use tags **nordicrower-v0.1.0**, **nordicrower-v0.1.1**, etc. They trigger only
+Use tags **nordicrower-v1.0.0**, **nordicrower-v1.0.1**, etc. They trigger only
 `.github/workflows/nordicrower-release.yml`; NordicFTMS keeps its existing `v*`
 tags. NordicRower's VERSION_NAME property accepts major.minor.patch, and Gradle
-derives a monotonically increasing Android version code (0.1.0 is 1009, above
+derives a monotonically increasing Android version code (1.0.0 is 1000009, above
 alpha.4's 4). Future components are bounded: minor <=999, patch <=99.
 
-Configure repository secrets NORDICROWER_KEYSTORE_BASE64,
+To build signed assets in CI, configure repository secrets NORDICROWER_KEYSTORE_BASE64,
 NORDICROWER_KEYSTORE_PASSWORD, NORDICROWER_KEY_ALIAS and NORDICROWER_KEY_PASSWORD
 from the existing alpha signing keystore. Keep that key private and backed up.
 The packaging script checks its public certificate fingerprint against alpha.4
@@ -99,13 +103,17 @@ For a local signed release, set NORDICROWER_KEYSTORE_PATH and the three signing
 credential environment variables, then run:
 
 ```sh
-./gradlew -PVERSION_NAME=0.1.0 :app:testDebugUnitTest :app:lintRelease :app:assembleRelease
-python3 package-release.py --version 0.1.0
+./gradlew -PVERSION_NAME=1.0.0 :app:testDebugUnitTest :app:lintRelease :app:assembleRelease
+python3 package-release.py --version 1.0.0
 ```
 
 The script validates signature, package, version and non-debuggable status,
 then writes the APK, curated ZIP and SHA256SUMS.txt to `build/release/`.
-The workflow creates a **draft** GitHub release for review before publication.
+With signing secrets configured, the workflow creates a **draft** GitHub release
+for review before publication. Without them, it runs tests and lint only; the
+maintainer can publish locally signed and verified assets with the GitHub CLI.
+Publish NordicRower with `--latest=false` to preserve NordicFTMS's existing
+repository-wide latest-release designation; use NordicRower's own tag links.
 It needs no GlassOS certificates, NordicFTMS secrets or NordicFTMS build.
 
 Public release builds disable Android debugging. Save/Share generates the

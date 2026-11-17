@@ -30,30 +30,45 @@ jobs:
           VERSION="${GITHUB_REF_NAME#nordicrower-v}"
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - name: Restore persistent NordicRower signing key
+      - name: Check persistent NordicRower signing configuration
+        id: signing
         env:
           KEYSTORE_BASE64: ${{ secrets.NORDICROWER_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.NORDICROWER_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.NORDICROWER_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.NORDICROWER_KEY_PASSWORD }}
         run: |
-          test -n "$KEYSTORE_BASE64" || { echo 'Configure the existing NordicRower signing key before releasing.' >&2; exit 1; }
+          if [[ -z "$KEYSTORE_BASE64" || -z "$STORE_PASSWORD" || -z "$KEY_ALIAS" || -z "$KEY_PASSWORD" ]]; then
+            echo 'configured=false' >> "$GITHUB_OUTPUT"
+            echo '::notice::Signing secrets are not configured. CI will run source checks; publish locally signed, verified assets.'
+            exit 0
+          fi
           umask 077
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/nordicrower.keystore"
+          echo 'configured=true' >> "$GITHUB_OUTPUT"
       - name: Prepare pinned USB dependency
         run: bash setup-vendor.sh
-      - name: Test, lint and build NordicRower
+      - name: Test and lint NordicRower
+        run: ./gradlew -PVERSION_NAME="${{ steps.version.outputs.version }}" :app:testDebugUnitTest :app:lintRelease
+      - name: Build signed NordicRower APK
+        if: steps.signing.outputs.configured == 'true'
         env:
           NORDICROWER_KEYSTORE_PATH: ${{ runner.temp }}/nordicrower.keystore
           NORDICROWER_KEYSTORE_PASSWORD: ${{ secrets.NORDICROWER_KEYSTORE_PASSWORD }}
           NORDICROWER_KEY_ALIAS: ${{ secrets.NORDICROWER_KEY_ALIAS }}
           NORDICROWER_KEY_PASSWORD: ${{ secrets.NORDICROWER_KEY_PASSWORD }}
-        run: ./gradlew -PVERSION_NAME="${{ steps.version.outputs.version }}" :app:testDebugUnitTest :app:lintRelease :app:assembleRelease
+        run: ./gradlew -PVERSION_NAME="${{ steps.version.outputs.version }}" :app:assembleRelease
       - name: Verify upgrade identity and package
+        if: steps.signing.outputs.configured == 'true'
         run: python3 package-release.py --version "${{ steps.version.outputs.version }}"
       - name: Create reviewable release draft
+        if: steps.signing.outputs.configured == 'true'
         uses: softprops/action-gh-release@v2
         with:
           name: NordicRower ${{ steps.version.outputs.version }}
           draft: true
           prerelease: false
+          make_latest: "false"
           body_path: nordicrower/docs/release-notes.md
           files: |
             nordicrower/build/release/NordicRower.apk
