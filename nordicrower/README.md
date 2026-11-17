@@ -1,13 +1,15 @@
 # NordicRower
 
 Independent experimental Android app: `com.nordicrower.app`, version
-`0.1.0-alpha.3`. It does not modify, extend, or depend on NordicFTMS/GlassOS.
+`0.1.0-alpha.4`. It does not modify, extend, or depend on NordicFTMS/GlassOS.
 
 ## Current Prototype
 
 - Direct FitPro USB controller access, using pinned Hyperborea components.
 - FitPro1 and FitPro2 transport/handshake paths with rower-only validation before
   workout initialization. Controllers must declare watts and actual stroke data.
+- Compact V1 rower polling: at most 13 payload bytes for declared rowing/session
+  fields, checked framing/checksums and strict rejection of incomplete telemetry.
 - FTMS service `1826`, Rower Data `2AD1`, power feature, Training Status and
   Machine Status characteristics, correct rower advertising type.
 - Complete measurements from real watts, stroke rate, and stroke count. No RPM
@@ -48,11 +50,14 @@ belong in Git. See [dependency notes](docs/hyperborea-dependency.md).
 
 ## Hardware Ownership
 
-Alpha.3 permits both discovery and streaming while Wolf/iFIT remains enabled.
+Alpha.4 permits both discovery and streaming while Wolf/iFIT remains enabled.
 Keep NordicRower in the foreground during the trial. Wolf package state is
 logged for diagnostics; it is not proof of USB ownership. NordicRower uses
-normal USB interface claims without forcing access. If another client actually
-holds the interface, connection can still fail with a logged claim error.
+a normal USB interface claim first. On HID interfaces only, if sysfs identifies
+the binding as `usbhid`, it can retry with kernel-driver detachment. `usbfs`,
+other bindings and unknown/inaccessible ownership never authorize detachment.
+The driver probe is best effort and is not an atomic ownership guarantee;
+concurrent clients can still interfere. Connection failures remain logged.
 Concurrent operation and controller behavior remain unverified on the rower.
 An exhausted USB claim opens a French recovery guide with a button to Wolf's
 Android app settings. The user can choose Force stop there, return and retry
@@ -63,7 +68,7 @@ The app still rejects a GlassOS/Mithlond console. It never disables or uninstall
 iFIT itself, requests root, alters launcher settings, or flashes firmware.
 Connecting requires a visible user confirmation and USB access. Preserve Wolf's
 installed APK before a customer trial and disconnect NordicRower at the end.
-No package disable/enable commands are required for the default alpha.3 trial.
+No package disable/enable commands are required for the default alpha.4 trial.
 No takeover commands have been executed on the local treadmill or customer's
 equipment.
 
@@ -85,7 +90,10 @@ do not validate real controller data or either rowing app's full handshake.
 
 Disconnect the streaming session before starting discovery; the probe must not
 compete for the USB interface. It asks only for declared, known readback fields.
-V1 reads may be blocked by security; this is logged without unlocking. V2 lists
+V1 reads may be blocked by security; this is logged without unlocking. The
+observed firmware 83/hardware 1 rower omits core opcode 02 from its optional
+command list despite using it; discovery permits declared readbacks for that
+confirmed profile. Other omitted commands remain gated. V2 lists
 must complete before subscriptions are attempted, and the rower type must be
 confirmed before reading targets/limits. Missing or malformed data is UNKNOWN.
 Declared resistance/ERG fields are candidates, not proof of writable features
@@ -100,5 +108,8 @@ Run-as relies on the experimental APK being debuggable; other build types may
 deny it. Collect before uninstalling or clearing app data. Reports are private
 support material and system dumps may contain incidental identifiers.
 
-See [experimental installation notes](../experimental/NordicRower-0.1.0-alpha.3.md)
+See [October 27 QZ findings](docs/qz-oct27-findings.md) for the evidence,
+remaining uncertainties and alpha.4 changes.
+
+See [experimental installation notes](../experimental/NordicRower-0.1.0-alpha.4.md)
 for the test package, reversible setup, and validation limits.

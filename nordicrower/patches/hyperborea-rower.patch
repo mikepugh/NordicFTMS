@@ -16,40 +16,155 @@
          strokeRate = strokeRate,
 +        receivedAtMillis = System.nanoTime() / 1_000_000L,
      )
- 
+
      fun reset() {
+--- a/src/com/nettarion/hyperborea/hardware/fitpro/transport/UsbHidTransport.kt
++++ b/src/com/nettarion/hyperborea/hardware/fitpro/transport/UsbHidTransport.kt
+@@ -79,7 +79,14 @@
+     /** The MCU intermittently refuses interface claims; keep asking like its own software does. */
+     private suspend fun claimInterfaceWithRetry() {
+         repeat(CLAIM_ATTEMPTS) { attempt ->
+-            if (connection.claimInterface(usbInterface, true)) {
++            val claim = com.nordicrower.app.RowerUsbClaim.tryClaim(kernelDriver = {
++                val driver = com.nordicrower.app.RowerUsbClaim.driverName(deviceName, usbInterface.id)
++                if (attempt == 0) logger.i(TAG, "Normal USB claim failed; sysfs driver=${driver ?: "UNKNOWN"}")
++                driver.takeIf { usbInterface.interfaceClass == android.hardware.usb.UsbConstants.USB_CLASS_HID }
++            }) { force -> connection.claimInterface(usbInterface, force) }
++            if (claim != null) {
++                if (claim == com.nordicrower.app.RowerUsbClaim.Mode.KERNEL_HID_DETACHED)
++                    logger.i(TAG, "USB interface claimed with identified kernel HID driver detachment")
+                 if (attempt > 0) logger.i(TAG, "Claimed USB interface after ${attempt + 1} attempts")
+                 return
+             }
+@@ -105,10 +112,11 @@
+                 val transferred = transferMutex.withLock {
+                     connection.bulkTransfer(outEndpoint, padded, padded.size, WRITE_TIMEOUT_MS)
+                 }
+-                if (transferred >= 0) {
++                if (transferred == padded.size) {
+                     if (attempts > 0) logger.i(TAG, "USB write succeeded after ${attempts + 1} attempts")
+                     return@withContext
+                 }
++                check(transferred <= 0) { "Partial USB write: $transferred/${padded.size}; refusing to replay packet" }
+                 attempts++
+                 if (attempts >= WRITE_MAX_ATTEMPTS) {
+                     // A controller that refuses an entire retry budget is in a state no software
 --- a/src/com/nettarion/hyperborea/hardware/fitpro/v1/V1Session.kt
 +++ b/src/com/nettarion/hyperborea/hardware/fitpro/v1/V1Session.kt
 @@ -205,6 +205,7 @@
          ))
          delay(COMMAND_DELAY_MS)
- 
+
 +        if (V1DataField.IS_READY_TO_DISCONNECT.fieldIndex !in supportedBitFields) return
          repeat(READY_POLL_ATTEMPTS) {
              val response = sendReadWrite(readFields = setOf(V1DataField.IS_READY_TO_DISCONNECT))
              val ready = response?.fields?.get(V1DataField.IS_READY_TO_DISCONNECT)
-@@ -405,6 +406,7 @@
-         pollFields = computePollFields(supportedBitFields)
+@@ -402,9 +403,10 @@
+             "Device info: sw=$softwareVersion, hw=$hardwareVersion, serial=$serialNumber, " +
+                 "equipmentDeviceId=$equipmentDeviceId, supportedBitFields=${supportedBitFields.size}",
+         )
+-        pollFields = computePollFields(supportedBitFields)
          detectedDeviceType = DeviceDatabase.deviceTypeFromEquipmentId(equipmentDeviceId)
          logger.d(TAG, "Detected device type: $detectedDeviceType")
 +        com.nordicrower.app.RowerProtocolGuard.requireV1(deviceInfo.deviceId, supportedBitFields)
- 
++        pollFields = computePollFields(supportedBitFields)
+
          delay(COMMAND_DELAY_MS)
- 
-@@ -514,7 +516,11 @@
+
+@@ -514,8 +516,13 @@
      }
- 
+
      private suspend fun readStartupFields(equipmentDeviceId: Int) {
 -        val response = sendReadWrite(readFields = V1DataField.startupReadFields)
-+        val fieldsToRead = V1DataField.startupReadFields.filterTo(mutableSetOf()) {
+-        if (response == null || response.status != V1Message.STATUS_DONE || response.fields.isEmpty()) {
++        val fieldsToRead = setOf(V1DataField.MAX_RESISTANCE_LEVEL,
++            V1DataField.MOTOR_TOTAL_DISTANCE, V1DataField.TOTAL_TIME).filterTo(mutableSetOf()) {
 +            it.fieldIndex in supportedBitFields
 +        }
 +        if (fieldsToRead.isEmpty()) return
 +        val response = sendReadWrite(readFields = fieldsToRead)
-         if (response == null || response.status != V1Message.STATUS_DONE || response.fields.isEmpty()) {
++        if (response == null || response.status != V1Message.STATUS_DONE || response.isTruncated || response.fields.isEmpty()) {
              logger.d(TAG, "Startup field read returned no data: $response")
              return
-@@ -801,6 +807,10 @@
+         }
+@@ -576,35 +583,12 @@
+         delay(COMMAND_DELAY_MS)
+     }
+
+-    /**
+-     * Builds the per-loop read set from [V1DataField.periodicReadFields] intersected with the
+-     * device's self-declared [supportedBitFields]. We trust the device's declaration: if it didn't
+-     * claim a field, the MCU won't include bytes for it in the response, and asking anyway would
+-     * misalign every later field's offset (the bug that produced -10595 kcal / 139 km on the
+-     * NordicTrack 2950 Argon screenshot).
+-     *
+-     * Falls back to the full periodicReadFields set if [supportedBitFields] is empty (handshake
+-     * couldn't parse the device's bitmask) — that preserves the pre-fix behavior for devices
+-     * we've always worked with, and the warning makes the fallback visible.
+-     */
++    /** Poll genuine rowing telemetry and declared session fields in a bounded response. */
+     private fun computePollFields(supportedBitFields: Set<Int>): Set<V1DataField> {
+-        if (supportedBitFields.isEmpty()) {
+-            logger.w(
+-                TAG,
+-                "Device declared no supportedBitFields; polling the full periodicReadFields set. " +
+-                    "If the MCU omits any of these fields the decoder will misalign — watch for isTruncated.",
+-            )
+-            return V1DataField.periodicReadFields
+-        }
+-        val filtered = V1DataField.periodicReadFields.filterTo(mutableSetOf()) { it.fieldIndex in supportedBitFields }
+-        val omitted = V1DataField.periodicReadFields - filtered
+-        if (omitted.isNotEmpty()) {
+-            logger.i(
+-                TAG,
+-                "Filtering ${omitted.size} unsupported field(s) from poll: ${omitted.joinToString { it.name }}",
+-            )
+-        }
+-        return filtered
++        val fields = com.nordicrower.app.RowerV1ReadPlan.periodicFields(supportedBitFields)
++        logger.i(TAG, "Rower poll fields=${fields.sortedBy { it.fieldIndex }.joinToString { it.name }} " +
++            "expectedPayloadBytes=${fields.sumOf { it.sizeBytes }}")
++        return fields
+     }
+
+     /**
+@@ -671,7 +655,7 @@
+         writeMessage(V1Message.Outgoing.ReadWriteData(writeFields = writeFields, readFields = readFields))
+         delay(READ_DELAY_MS)
+         val raw = readPacketOrNull() ?: return null
+-        return V1Codec.decodeSingleDataResponse(raw, readFields.ifEmpty { V1DataField.periodicReadFields })
++        return readResponse(raw, readFields) as? V1Message.Incoming.DataResponse
+     }
+
+     private suspend fun writeMessage(message: V1Message.Outgoing) {
+@@ -724,8 +708,7 @@
+         }
+
+         // ReadWriteData targets DEVICE_MAIN (0x02) — FITNESS_BIKE (0x07) returns DEV_NOT_SUPPORTED.
+-        // pollFields is periodicReadFields ∩ supportedBitFields so the response payload size matches
+-        // the decoder's positional read; see V1Codec.decodeDataResponseForFields.
++        // A rower-specific request avoids oversized replies and ambiguous composite console fields.
+         writeMessage(V1Message.Outgoing.ReadWriteData(
+             writeFields = writeFields,
+             readFields = pollFields,
+@@ -748,6 +731,7 @@
+             readResponse(firstPacket, pollFields)
+         } catch (e: Exception) {
+             logger.w(TAG, "Malformed response (${firstPacket.size} bytes): ${e.message}")
++            _exerciseData.value = null
+             // Re-queue write fields so commands aren't lost
+             if (writeFields.isNotEmpty()) {
+                 pendingWriteMutex.withLock {
+@@ -795,12 +779,18 @@
+                 logger.w(
+                     TAG,
+                     "DataResponse payload size doesn't match the requested ${pollFields.size}-field shape " +
+-                        "(decoded ${decoded.fields.size} field(s)) — later field offsets may be unreliable.",
++                        "(expectedPayloadBytes=${pollFields.sumOf { it.sizeBytes }}, " +
++                        "requested=${pollFields.sortedBy { it.fieldIndex }.joinToString { it.name }}, " +
++                        "decoded ${decoded.fields.size} fields) — discarding incomplete rower data.",
+                 )
+             } else if (!decoded.isTruncated && lastTruncatedSeen) {
                  logger.i(TAG, "DataResponse payload size now matches the requested field shape again.")
              }
              lastTruncatedSeen = decoded.isTruncated
@@ -57,10 +172,10 @@
 +                _exerciseData.value = null
 +                return
 +            }
- 
+
              applyDataResponse(decoded.fields)
              handleKeyObject(decoded.keyObject)
-@@ -869,7 +879,7 @@
+@@ -869,7 +859,7 @@
                      mcuErgMode = engaged
                  }
                  V1DataField.VERTICAL_METER_GAIN -> accumulator.updateVerticalGain(value)
@@ -69,14 +184,35 @@
                  V1DataField.STROKES_PER_MINUTE -> accumulator.updateStrokeRate(value.toInt())
                  // KEY_OBJECT is decoded onto DataResponse.keyObject and handled in handleKeyObject(),
                  // so it never reaches this map — this case only keeps the `when` exhaustive.
-@@ -937,6 +947,7 @@
+@@ -937,6 +927,7 @@
      }
- 
+
      private fun estimatePowerIfNeeded() {
 +        if (detectedDeviceType == DeviceType.ROWER) return
          val snapshot = accumulator.snapshot()
          if (snapshot.power != null && snapshot.power != 0) return // MCU provides power
          val speed = snapshot.speed ?: return
+@@ -1000,6 +991,7 @@
+     ): V1Message.Incoming? {
+         if (V1Codec.isMultiPacketHeader(firstPacket)) {
+             val expected = V1Codec.expectedPacketCount(firstPacket)
++            check(expected in 1..16) { "Invalid V1 fragment count: $expected" }
+             val packets = mutableListOf(firstPacket)
+             // Total deadline across the whole reassembly: the header's count byte is
+             // MCU-supplied, and each readPacket() can block up to its own timeout — a garbled
+@@ -1017,9 +1009,9 @@
+                 }
+                 return null
+             }
+-            return V1Codec.decode(packets, dataResponseFields)
+-        }
+-        return V1Codec.decodeSingle(firstPacket, dataResponseFields)
++            return com.nordicrower.app.RowerV1Reply.decode(packets, dataResponseFields)
++        }
++        return com.nordicrower.app.RowerV1Reply.decode(listOf(firstPacket), dataResponseFields)
+     }
+
+     companion object {
 --- a/src/com/nettarion/hyperborea/hardware/fitpro/v2/V2Codec.kt
 +++ b/src/com/nettarion/hyperborea/hardware/fitpro/v2/V2Codec.kt
 @@ -68,6 +68,7 @@
@@ -85,7 +221,7 @@
          val length = data[2].toInt() and 0xFF
 +        if (length > data.size - 3) return null
          val payload = if (data.size > 3) data.copyOfRange(3, minOf(3 + length, data.size)) else byteArrayOf()
- 
+
          return when (type) {
 --- a/src/com/nettarion/hyperborea/hardware/fitpro/v2/V2FeatureId.kt
 +++ b/src/com/nettarion/hyperborea/hardware/fitpro/v2/V2FeatureId.kt
@@ -113,7 +249,7 @@
              }
              declaredFeatures = supported
 +            check(supported != null) { "No supported-feature list; refusing blind hardware initialization" }
- 
+
              // Identity (versions, part number, model name, serial) comes from the product-info
              // field stream — queried between the features reply and subscribing, the order the
 @@ -118,6 +119,8 @@
@@ -122,12 +258,12 @@
              detectedDeviceType = resolveDeviceType(supported)
 +            com.nordicrower.app.RowerProtocolGuard.requireV2(supported, _reportedDeviceType.value)
 +            detectedDeviceType = DeviceType.ROWER
- 
+
              // One-shot bring-up config (heartbeat + idle-mode lock). After the type is resolved,
              // because the idle-lock value the firmware requires depends on whether it's a belt machine.
 @@ -648,6 +651,10 @@
      }
- 
+
      private fun applyEvent(feature: V2FeatureId, value: Float) {
 +        if (!value.isFinite()) {
 +            logger.w(TAG, "Ignoring non-finite $feature event")
@@ -145,27 +281,3 @@
              V2FeatureId.RPM -> accumulator.updateCadence(value.toInt())
              V2FeatureId.CURRENT_KPH -> {
                  // Diagnostic: does this console actually report belt speed, and when? For Zwift
---- a/src/com/nettarion/hyperborea/hardware/fitpro/transport/UsbHidTransport.kt
-+++ b/src/com/nettarion/hyperborea/hardware/fitpro/transport/UsbHidTransport.kt
-@@ -79,7 +79,7 @@
-     /** The MCU intermittently refuses interface claims; keep asking like its own software does. */
-     private suspend fun claimInterfaceWithRetry() {
-         repeat(CLAIM_ATTEMPTS) { attempt ->
--            if (connection.claimInterface(usbInterface, true)) {
-+            if (connection.claimInterface(usbInterface, false)) {
-                 if (attempt > 0) logger.i(TAG, "Claimed USB interface after ${attempt + 1} attempts")
-                 return
-             }
-@@ -105,10 +105,11 @@
-                 val transferred = transferMutex.withLock {
-                     connection.bulkTransfer(outEndpoint, padded, padded.size, WRITE_TIMEOUT_MS)
-                 }
--                if (transferred >= 0) {
-+                if (transferred == padded.size) {
-                     if (attempts > 0) logger.i(TAG, "USB write succeeded after ${attempts + 1} attempts")
-                     return@withContext
-                 }
-+                check(transferred <= 0) { "Partial USB write: $transferred/${padded.size}; refusing to replay packet" }
-                 attempts++
-                 if (attempts >= WRITE_MAX_ATTEMPTS) {
-                     // A controller that refuses an entire retry budget is in a state no software

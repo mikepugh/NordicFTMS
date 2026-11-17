@@ -106,10 +106,13 @@ class RowerDiscovery(
             record("masterLibraryVersion=${version?.masterLibraryVersion ?: "UNKNOWN"} build=${version?.masterLibraryBuild ?: "UNKNOWN"}")
         }
         step(4, "Lecture des limites, cibles et état ERG")
-        if (commands?.contains(V1Message.CMD_READ_WRITE_DATA) != true) {
+        if (!RowerV1ReadPlan.allowCoreReadback(info.deviceId, info.softwareVersion, info.hardwareVersion, fields, commands)) {
             record("ReadWriteData not declared or command list unavailable; all readbacks UNKNOWN; no blind reads")
             return
         }
+        if (commands?.contains(V1Message.CMD_READ_WRITE_DATA) != true) record(
+            "ReadWriteData omitted from command list; observed ROWER firmware 83/hardware 1 supports core opcode 02; " +
+                "reading declared fields only, without writes or security unlock")
         for (field in v1ReadFields.filter { it.fieldIndex in fields }) {
             val response = queryV1(V1Message.Outgoing.ReadWriteData(readFields = setOf(field)), setOf(field))
                 as? V1Message.Incoming.DataResponse

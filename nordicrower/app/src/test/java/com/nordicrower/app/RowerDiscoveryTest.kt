@@ -92,6 +92,26 @@ class RowerDiscoveryTest {
         assertEquals(2, transport.writes.size)
         assertTrue(records.any { it.contains("no blind reads") })
     }
+    @Test fun observedFirmwareReadsDeclaredRowerFieldsWhenCoreOpcodeIsOmitted() = runTest {
+        val records = mutableListOf<String>()
+        val transport = FakeTransport { request ->
+            listOf(when (request[2].toInt() and 0xff) {
+                0x81 -> infoV1(RowerV1ReadPlanTest.customerFields).apply {
+                    this[4] = 83; this[5] = 1; this[lastIndex] = V1Codec.checksum(copyOf(size - 1))
+                }
+                0x88 -> responseV1(0x88, RowerV1ReadPlanTest.customerCommands.sorted().map { it.toByte() }.toByteArray())
+                0x82 -> responseV1(0x82, ByteArray(11))
+                0x84 -> responseV1(0x84, ByteArray(3))
+                2 -> responseV1(2, ByteArray(fieldV1(request).sizeBytes).apply { this[0] = 1 })
+                else -> error("Discovery must not send authentication or workout writes")
+            })
+        }
+        RowerDiscovery(transport, 2, records::add) { _, _ -> }.discover()
+        assertTrue(records.any { it.contains("omitted from command list") })
+        assertTrue(records.any { it.contains("109:STROKES") && it.contains("value=1.0") })
+        assertTrue(records.any { it.contains("110:STROKES_PER_MINUTE") && it.contains("value=1.0") })
+        assertFalse(transport.writes.any { it[2].toInt() and 0xff == 0x90 })
+    }
     @Test fun v1MalformedMaskIsUnknownNotUnsupported() = runTest {
         val bad = infoV1(setOf(2)).apply { this[12] = 50; this[lastIndex] = V1Codec.checksum(copyOf(size - 1)) }
         val records = mutableListOf<String>()

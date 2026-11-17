@@ -129,6 +129,8 @@ try {
         '-t', '5000', 'NordicRower:V', 'BluetoothGattServer:V', 'BluetoothLeAdvertiser:V', 'AndroidRuntime:E', '*:S')
     Save-Read -Name 'crash.txt' -Arguments @('logcat', '-d', '-b', 'crash', '-v', 'threadtime', '-t', '200', '*:V')
     Save-Read -Name 'usb.txt' -Arguments @('shell', 'dumpsys', '-t', '10', 'usb')
+    Save-Read -Name 'usb-hid-driver.txt' -Arguments @('shell', 'ls', '-l', '/sys/bus/usb/drivers/usbhid')
+    Save-Read -Name 'usb-userspace-driver.txt' -Arguments @('shell', 'ls', '-l', '/sys/bus/usb/drivers/usbfs')
     Save-Read -Name 'bluetooth.txt' -Arguments @('shell', 'dumpsys', '-t', '10', 'bluetooth_manager')
     Save-Read -Name 'package.txt' -Arguments @('shell', 'dumpsys', '-t', '10', 'package', 'com.nordicrower.app')
     Save-Read -Name 'service.txt' -Arguments @('shell', 'dumpsys', '-t', '10', 'activity', 'services', 'com.nordicrower.app')
@@ -136,6 +138,8 @@ try {
     Save-Read -Name 'wolf-disabled.txt' -Arguments @('shell', 'pm', 'list', 'packages', '-d', 'com.ifit.standalone')
     Save-Read -Name 'wolf-package.txt' -Arguments @('shell', 'dumpsys', '-t', '10', 'package', 'com.ifit.standalone')
     Save-Read -Name 'wolf-services.txt' -Arguments @('shell', 'dumpsys', '-t', '10', 'activity', 'services', 'com.ifit.standalone')
+    Save-Read -Name 'qz-package.txt' -Arguments @('shell', 'dumpsys', '-t', '10', 'package', 'org.cagnulen.qdomyoszwift')
+    Save-Read -Name 'qz-services.txt' -Arguments @('shell', 'dumpsys', '-t', '10', 'activity', 'services', 'org.cagnulen.qdomyoszwift')
     Save-Read -Name 'android.txt' -Arguments @('shell', 'getprop', 'ro.build.fingerprint')
     Save-Read -Name 'console-time.txt' -Arguments @('shell', 'date')
 } catch {
@@ -144,7 +148,7 @@ try {
     Write-Warning 'Collecte incomplete ; le rapport partiel reste utile.'
 }
 $summary = @"
-NordicRower diagnostic collector v2
+NordicRower diagnostic collector v3
 PC time: $((Get-Date).ToString('o'))
 Unavailable/failed reads: $failed (old rotated journals may legitimately not exist)
 No Android settings/apps/logs/controller targets were changed. No automatic upload.
@@ -154,6 +158,8 @@ journal*.txt: persistent app history across restarts (bounded to roughly 3 MiB).
 status.txt: last saved session state, telemetry and BLE notification counters (not guaranteed current after a crash).
 logcat/crash/dumps: recent system state, may contain incidental personal data from other apps/devices.
 wolf-enabled/disabled/package/services: package state and service evidence; enabled or USB permission alone does NOT prove interface ownership.
+usb-*-driver: kernel HID and userspace driver bindings; absent/inaccessible paths are UNKNOWN, not proof that USB is free.
+qz-package/services: competing QZ installation/service evidence; these reads do not start or stop QZ.
 DECLARED_NOT_WRITE_TESTED: candidate feature, NOT proof of write acceptance or native ERG operation.
 NOT_DECLARED: absent from a complete feature list; UNKNOWN: missing/incomplete reply, never assume unsupported.
 Bluetooth notification completion does not prove EXR/RowerTrain interpreted the rower data.

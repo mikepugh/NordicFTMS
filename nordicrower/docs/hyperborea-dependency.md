@@ -23,10 +23,21 @@ The patch contains our rower-specific changes, not the upstream codebase:
 - Require actual stroke-count/rate fields; do not infer strokes from RPM.
 - Add FitPro2 rower feature IDs 343/344, recovered from the supplied Wolf APK.
 - Do not estimate rower watts or publish truncated positional V1 data.
-- Do not forcibly claim a USB interface from another owner.
+- Try normal USB claims first; permit a HID kernel-driver detach retry only when
+  sysfs reports `usbhid`. Other/unknown ownership uses the manual recovery flow.
 - Reject truncated FitPro2 packets and partial USB writes.
 - Limit optional V1 reads to declared fields, interpret rower stroke count as
   unsigned, and ignore non-finite V2 events.
+- Restrict V1 rower polls to declared rowing/session fields (13 payload bytes at
+  most), avoid unrelated startup limits, and reject mismatched startup replies.
+- Validate single and fragmented V1 reply framing, length, sequence and checksum
+  before decoding. Clear live measurements after malformed polling replies.
 
 No proprietary Wolf source is included. Hardware behavior on the customer's
 Rower700 is not yet validated.
+
+When changing the tracked patch, regenerate the ignored dependency before
+building. Preserve any local vendor changes separately first. Verification for
+alpha.4 applies the patch to the recovered exact pinned baseline and compares
+every resulting source file with the sources used for the APK. The setup script
+continues to leave an existing vendor directory untouched.
