@@ -11,6 +11,8 @@ import android.provider.Settings
 import android.view.View
 import android.widget.*
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import java.io.File
 
 class MainActivity : Activity() {
     private lateinit var status: TextView
@@ -20,8 +22,10 @@ class MainActivity : Activity() {
     private lateinit var preparation: TextView
     private lateinit var logs: TextView
     private lateinit var discovery: TextView
+    private lateinit var statistics: TextView
     private lateinit var connectButton: Button
     private lateinit var discoverButton: Button
+    private lateinit var disconnectButton: Button
     private lateinit var usb: UsbManager
     private lateinit var usbRecoveryPanel: LinearLayout
     private lateinit var usbRecoveryInstructions: TextView
@@ -33,13 +37,17 @@ class MainActivity : Activity() {
     private var lastInventoryAt = 0L
     private val refresh = object : Runnable {
         override fun run() {
-            status.text = RowerLog.state
-            metrics.text = RowerLog.metrics
-            bluetooth.text = "Bluetooth : ${RowerLog.clients} connexion(s)\n" +
-                "Notifications : ${RowerLog.notifications} envoyées, ${RowerLog.delivered} terminées, ${RowerLog.notificationErrors} erreurs"
+            status.text = RowerLog.displayState()
+            metrics.text = RowerLog.displayMetrics()
+            bluetooth.text = "Bluetooth : ${RowerLog.clients} application(s) connectée(s), ${RowerLog.subscribers} abonnée(s) aux mesures\n" +
+                "Dans votre application sur téléphone ou tablette, recherchez « NordicRower » comme rameur."
             connectButton.isEnabled = !RowerLog.busy
             discoverButton.isEnabled = !RowerLog.busy
+            disconnectButton.isEnabled = RowerLog.busy
             discovery.text = discoverySummary()
+            statistics.text = "Notifications Bluetooth : ${RowerLog.notifications} mises en file, " +
+                "${RowerLog.delivered} terminées, ${RowerLog.notificationErrors} erreurs.\n" +
+                "Vérifiez aussi les mesures dans l'application réceptrice."
             logs.text = RowerLog.recent()
             showUsbRecovery()
             if (SystemClock.elapsedRealtime() - lastInventoryAt >= 2000) showInventory()
@@ -61,16 +69,17 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         usb = getSystemService(UsbManager::class.java)
+        fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 24, 32, 24)
+            setPadding(dp(24), dp(16), dp(24), dp(16))
         }
         fun text(size: Float = 16f) = TextView(this).apply {
             textSize = size; setPadding(0, 12, 0, 12); layout.addView(this)
         }
         text(26f).text = "NordicRower"
         text(14f).text = BuildConfig.VERSION_NAME
-        status = text(19f).apply { this.text = RowerLog.state }
+        status = text(19f).apply { this.text = RowerLog.displayState(); accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE }
         usbRecoveryPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
@@ -87,10 +96,8 @@ class MainActivity : Activity() {
                 setOnClickListener { RowerLog.usbClaimRecovery?.let { requestAction(it.action) } }
             })
         }.also { layout.addView(it) }
-        metrics = text(22f).apply { this.text = RowerLog.metrics }
+        metrics = text(28f).apply { this.text = RowerLog.displayMetrics() }
         bluetooth = text()
-        preparation = text(18f)
-        inventory = text()
         fun button(label: String, icon: Int, action: () -> Unit): Button {
             return Button(this).apply {
                 this.text = label; isAllCaps = false
@@ -98,22 +105,74 @@ class MainActivity : Activity() {
                 setOnClickListener { action() }
             }.also { layout.addView(it) }
         }
-        button("Actualiser l'état du matériel", android.R.drawable.ic_popup_sync) { showInventory() }
         connectButton = button("Connecter le rameur", android.R.drawable.ic_media_play) { requestAction("connect") }
-        button("Déconnecter", android.R.drawable.ic_media_pause) {
+        disconnectButton = button("Déconnecter", android.R.drawable.ic_media_pause) {
             startService(Intent(this, RowerService::class.java).setAction("stop"))
         }
-        discoverButton = button("Rechercher les capacités", android.R.drawable.ic_menu_search) { requestAction("discover") }
-        discovery = text(15f)
-        button("Exporter les diagnostics", android.R.drawable.ic_menu_save) {
-            startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).setType("text/plain")
-                .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE, "NordicRower-diagnostics.txt"), 2)
+        text().text = "Fermez QZ et son Companion avant la connexion. Gardez NordicRower au premier plan pendant la séance.\n" +
+            "Puissance et coups de rame uniquement ; la résistance reste réglée sur le rameur."
+        button("Partager les diagnostics", android.R.drawable.ic_menu_share) { shareDiagnostics() }
+        button("Enregistrer les diagnostics", android.R.drawable.ic_menu_save) {
+            val adbCopySaved = prepareAdbExport()
+            try {
+                startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).setType("text/plain")
+                    .addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE, RowerLog.exportName()), 2)
+            } catch (e: ActivityNotFoundException) {
+                Toast.makeText(this, if (adbCopySaved) "Rapport enregistré pour le script ADB ; aucun sélecteur de fichiers disponible."
+                    else "Aucun sélecteur de fichiers disponible ; utilisez Partager les diagnostics.", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                RowerLog.e("Diagnostics", "Cannot prepare saved report", e)
+                Toast.makeText(this, "Enregistrement indisponible ; utilisez Partager les diagnostics.", Toast.LENGTH_LONG).show()
+            }
         }
-        logs = text(13f).apply { typeface = android.graphics.Typeface.MONOSPACE }
+        val details = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
+        button("Afficher / masquer les détails techniques", android.R.drawable.ic_menu_info_details) {
+            details.visibility = if (details.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        }
+        layout.addView(details)
+        // Reuse the same layout helpers for the optional diagnostic section.
+        fun detailText(size: Float = 16f) = text(size).also { layout.removeView(it); details.addView(it) }
+        preparation = detailText()
+        inventory = detailText()
+        statistics = detailText()
+        button("Actualiser l'état du matériel", android.R.drawable.ic_popup_sync) { showInventory() }
+            .also { layout.removeView(it); details.addView(it) }
+        discoverButton = button("Rechercher les capacités", android.R.drawable.ic_menu_search) { requestAction("discover") }
+            .also { layout.removeView(it); details.addView(it) }
+        discovery = detailText(15f)
+        logs = detailText(13f).apply { typeface = android.graphics.Typeface.MONOSPACE }
         setContentView(ScrollView(this).apply { addView(layout) })
         val filter = IntentFilter("com.nordicrower.app.USB_PERMISSION")
         ContextCompat.registerReceiver(this, permissionReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         showInventory()
+    }
+
+    private fun prepareAdbExport(): Boolean = try {
+        RowerReports.saveForAdb(this)
+        true
+    } catch (e: Exception) {
+        RowerLog.e("Diagnostics", "ADB export copy unavailable; native save/share may still work", e)
+        false
+    }
+
+    private fun shareDiagnostics() {
+        prepareAdbExport()
+        try {
+            val directory = File(cacheDir, "reports").apply { mkdirs() }
+            // Reports are generated from this app's journal, never from arbitrary user files.
+            directory.listFiles()?.filter { it.lastModified() < System.currentTimeMillis() - 86_400_000L }
+                ?.forEach { it.delete() }
+            val file = File(directory, RowerLog.exportName()).apply { writeText(RowerLog.export()) }
+            val uri = FileProvider.getUriForFile(this, "$packageName.reports", file)
+            val send = Intent(Intent.ACTION_SEND).setType("text/plain")
+                .putExtra(Intent.EXTRA_STREAM, uri)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                .apply { clipData = ClipData.newRawUri("NordicRower diagnostics", uri) }
+            startActivity(Intent.createChooser(send, "Envoyer le rapport NordicRower"))
+        } catch (e: Exception) {
+            RowerLog.e("Diagnostics", "Cannot share report", e)
+            Toast.makeText(this, "Partage indisponible ; enregistrez le rapport ou utilisez le script ADB.", Toast.LENGTH_LONG).show()
+        }
     }
     override fun onResume() { super.onResume(); handler.post(refresh); showInventory() }
     override fun onPause() { handler.removeCallbacks(refresh); super.onPause() }
@@ -220,8 +279,8 @@ class MainActivity : Activity() {
                 "Le diagnostic lit les fonctions déclarées et les valeurs disponibles, sans changer la résistance, " +
                 "les watts cibles ou l'état de la séance. Un rapport sera enregistré automatiquement, même en cas d'échec."
                 else "Wolf/iFIT peut rester activé. NordicRower essaiera l'accès USB et initialisera une séance. " +
-                    "Gardez NordicRower au premier plan pendant l'essai. Si l'interface USB est occupée, la connexion échouera. " +
-                    "Aucune application ne sera désactivée automatiquement. Ce prototype n'est pas encore validé sur votre rameur.")
+                    "Gardez NordicRower au premier plan pendant la séance. " +
+                    "Fermez QZ et son Companion avant de continuer. Si nécessaire, un guide vous permettra de forcer l'arrêt de Wolf/iFIT.")
             .setNegativeButton("Annuler", null).setPositiveButton(if (probe) "Lancer le diagnostic" else "Connecter") { _, _ ->
                 startForegroundService(Intent(this, RowerService::class.java).setAction(action))
             }.show()
@@ -246,7 +305,7 @@ class MainActivity : Activity() {
             else -> "Diagnostic interrompu"
         }
         return "$outcome\n$lastStep\nRésistance : ${feature("resistanceControl")}\nERG natif : ${feature("nativeErg")}\n" +
-            if (RowerLog.discoveryRunning) "" else "Récupérez les journaux avec collect-nordicrower-diagnostics.ps1 via ADB."
+            if (RowerLog.discoveryRunning) "" else "Utilisez Partager ou Enregistrer les diagnostics pour récupérer le rapport."
     }
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, results: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, results)
@@ -262,8 +321,12 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == 2 && resultCode == RESULT_OK) data?.data?.let { uri ->
             try {
-                contentResolver.openOutputStream(uri)?.use { it.write(RowerLog.export().toByteArray()) }
-            } catch (e: Exception) { RowerLog.e("Diagnostics", "Export failed", e) }
+                checkNotNull(contentResolver.openOutputStream(uri)).use { it.write(RowerLog.export().toByteArray()) }
+                Toast.makeText(this, "Rapport NordicRower enregistré", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                RowerLog.e("Diagnostics", "Export failed", e)
+                Toast.makeText(this, "Impossible d'enregistrer le rapport ; réessayez ou utilisez Partager.", Toast.LENGTH_LONG).show()
+            }
         }
     }
 }

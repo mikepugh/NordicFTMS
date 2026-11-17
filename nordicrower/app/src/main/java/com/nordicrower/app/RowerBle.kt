@@ -51,9 +51,11 @@ class RowerBle(context: Context, private val name: String) {
             else registered.completeExceptionally(IllegalStateException("GATT service registration failed: $status"))
         }
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
+            if (closed) return
             if (newState == BluetoothProfile.STATE_CONNECTED && status == 0) devices[device.address] = device
             else { devices.remove(device.address); cccds.remove(device.address) }
             RowerLog.clients = devices.size
+            updateSubscribers()
             RowerLog.i("BLE", "Connection state=$newState status=$status clients=${devices.size}")
         }
         override fun onCharacteristicReadRequest(device: BluetoothDevice, requestId: Int, offset: Int,
@@ -68,12 +70,14 @@ class RowerBle(context: Context, private val name: String) {
         }
         override fun onDescriptorWriteRequest(device: BluetoothDevice, requestId: Int, descriptor: BluetoothGattDescriptor,
                                              preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray) {
+            if (closed) return
             val props = descriptor.characteristic.properties
             val flags = if (value.size == 2 && value[1].toInt() == 0) value[0].toInt() and 0xff else -1
             val valid = descriptor.uuid == uuid(0x2902) && !preparedWrite && offset == 0 &&
                 (flags == 0 || flags == 1 && props and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0 ||
                     flags == 2 && props and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0)
             if (valid) cccds.getOrPut(device.address) { ConcurrentHashMap() }[descriptor.characteristic.uuid] = flags
+            updateSubscribers()
             val status = if (valid) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED
             if (responseNeeded) server?.sendResponse(device, requestId, status, offset, null)
             RowerLog.i("BLE", "CCCD ${descriptor.characteristic.uuid} flags=$flags status=$status")
@@ -126,12 +130,16 @@ class RowerBle(context: Context, private val name: String) {
                     .addServiceData(ParcelUuid(uuid(0x1826)), byteArrayOf(1, 0x10, 0)).build(),
                 AdvertiseData.Builder().setIncludeDeviceName(true).build(), advertisement)
             withTimeout(10_000) { advertised.await() }
+            RowerLog.bleActive = true
         } catch (e: Exception) { close(); throw e }
     }
     fun publish(value: ByteArray) {
         for (device in devices.values) {
             if (cccds[device.address]?.get(rowerData.uuid) == 1) send(device, rowerData, value, false)
         }
+    }
+    private fun updateSubscribers() {
+        RowerLog.subscribers = devices.keys.count { cccds[it]?.get(rowerData.uuid) == 1 }
     }
     private fun send(device: BluetoothDevice, characteristic: BluetoothGattCharacteristic, value: ByteArray, confirm: Boolean) {
         if (closed) return
@@ -161,6 +169,7 @@ class RowerBle(context: Context, private val name: String) {
             try { server?.close() } finally {
                 server = null
                 devices.clear(); cccds.clear(); RowerLog.clients = 0
+                RowerLog.subscribers = 0; RowerLog.bleActive = false
                 if (originalName != null && adapter.name == name) adapter.setName(originalName)
             }
         }

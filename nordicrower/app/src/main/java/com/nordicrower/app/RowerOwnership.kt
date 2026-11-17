@@ -19,7 +19,7 @@ data class RowerOwnership(val glassConsoleInstalled: Boolean, val wolfEnabled: B
 enum class RowerOwnershipBlock(val message: String, val guidance: String) {
     GLASS_CONSOLE(
         "Console GlassOS détectée : NordicRower ne convient pas à cette console",
-        "Ce prototype est prévu pour le rameur Wolf. Utilisez NordicFTMS pour une console GlassOS compatible.",
+        "NordicRower est prévu pour les rameurs Wolf/iFIT avec contrôleur USB. Utilisez NordicFTMS pour une console GlassOS compatible.",
     ),
 }
 

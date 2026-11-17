@@ -1,5 +1,15 @@
 # NordicFTMS
 
+This repository contains two independently packaged Android apps:
+
+| App | Equipment interface | Get started |
+| --- | --- | --- |
+| **NordicFTMS** | GlassOS consoles; FTMS, RSC and DIRCON | Instructions below |
+| **NordicRower** | Compatible Wolf/iFIT FitPro USB rowers; Bluetooth rowing measurements | [NordicRower guide](nordicrower/README.md) |
+
+Choose the release asset matching your app on the [releases page](https://github.com/mikepugh/NordicFTMS/releases).
+NordicRower has its own version and package; it is installed on the rower's console.
+
 **BLE FTMS, Running Speed and Cadence (RSC), and DIRCON server for NordicTrack and ProForm fitness equipment.**
 
 NordicFTMS is an Android app that runs on your iFit-enabled treadmill, bike, elliptical, or rower and exposes it as a standard Bluetooth FTMS (Fitness Machine Service) device. It can also expose compatible equipment over Wahoo DIRCON on your local network. Any FTMS-compatible app — [PowerTread](https://powertread.fit/), Zwift, Kinomap, and others — can connect over Bluetooth, and supported treadmill apps can also connect over Wi-Fi through DIRCON.

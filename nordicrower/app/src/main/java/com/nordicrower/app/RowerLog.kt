@@ -3,6 +3,7 @@ package com.nordicrower.app
 import android.util.Log
 import android.content.Context
 import android.os.Build
+import android.os.SystemClock
 import com.nettarion.hyperborea.core.AppLogger
 import java.text.SimpleDateFormat
 import java.util.ArrayDeque
@@ -14,8 +15,10 @@ import java.util.UUID
 object RowerLog : AppLogger {
     private val entries = ArrayDeque<String>()
     @Volatile var state = "À l'arrêt"
-    @Volatile var metrics = "Puissance : indisponible\nCadence : indisponible\nCoups : indisponibles"
     @Volatile var clients = 0
+    @Volatile var subscribers = 0
+    @Volatile var bleActive = false
+    @Volatile var reading: RowerReading? = null
     @Volatile var notifications = 0L
     @Volatile var delivered = 0L
     @Volatile var notificationErrors = 0L
@@ -60,9 +63,14 @@ object RowerLog : AppLogger {
     override fun i(tag: String, message: String) = add("INFO", tag, message)
     override fun w(tag: String, message: String) = add("WARN", tag, message)
     override fun e(tag: String, message: String, throwable: Throwable?) = add("ERROR", tag, message, throwable)
-    @Synchronized private fun status() = "NordicRower ${BuildConfig.VERSION_NAME}; run=$runId\nState: $state\n$metrics\n" +
+    fun displayState(): String = if (bleActive) RowerStream.status(reading, SystemClock.elapsedRealtime(), clients, subscribers) else state
+    fun displayMetrics(): String = RowerStream.metrics(reading, SystemClock.elapsedRealtime())
+    fun exportName(): String = "NordicRower-${BuildConfig.VERSION_NAME}-diagnostics-" +
+        SimpleDateFormat("yyyyMMdd-HHmmssSSS", Locale.US).format(Date()) + "-$runId.txt"
+
+    @Synchronized private fun status() = "NordicRower ${BuildConfig.VERSION_NAME}; run=$runId\nState: ${displayState()}\n${displayMetrics()}\n" +
         "USB_RECOVERY_ACTION=${usbClaimRecovery?.action ?: "NONE"}\n" +
-        "BLE clients=$clients; queued=$notifications; completed=$delivered; errors=$notificationErrors\n" +
+        "BLE active=$bleActive; clients=$clients; rowerSubscribers=$subscribers; queued=$notifications; completed=$delivered; errors=$notificationErrors\n" +
         "Notification completion does not prove the receiving app interpreted the data.\n"
     @Synchronized fun persistStatus() {
         try { journal?.snapshot("status.txt", status()) } catch (e: Exception) { Log.e("NordicRower", "Status save failed", e) }
@@ -74,7 +82,7 @@ object RowerLog : AppLogger {
             Log.e("NordicRower", "Discovery save failed", e)
         }
     }
-    @Synchronized fun export() = status() + "\nDISCOVERY\n$discovery\nJOURNAL\n" +
+    @Synchronized fun export() = status() + "Exported: ${java.time.OffsetDateTime.now()}\n\nDISCOVERY\n$discovery\nJOURNAL\n" +
         (journal?.history() ?: entries.joinToString("\n"))
     @Synchronized fun recent() = entries.toList().takeLast(10).joinToString("\n")
 }

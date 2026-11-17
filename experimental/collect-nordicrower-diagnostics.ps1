@@ -14,8 +14,11 @@ Avec plusieurs appareils : ajoutez -Serial NUMERO_DE_L_APPAREIL.
 Lecture seule sur Android : aucun changement de resistance, aucune commande
 materielle, aucun lancement/arret d'application, aucun effacement, aucun root,
 aucun redemarrage. ADB peut demarrer son serveur habituel sur le PC.
-Les fichiers prives sont lus uniquement pour com.nordicrower.app via run-as,
-disponible dans l'APK experimental debuggable. Aucun fichier iFIT n'est lu.
+Appuyez d'abord sur Enregistrer les diagnostics dans NordicRower 0.1.0 ou plus
+recent : le script lit aussi cette copie exportee, sans run-as. Les fichiers
+prives des anciennes versions experimentales sont lus via run-as. L'APK public
+non debuggable refuse ces lectures privees ; ces erreurs sont normales.
+Aucun fichier iFIT n'est lu.
 Les journaux sont copies dans un dossier puis un ZIP sur le PC. Aucun envoi
 automatique. Les dumps USB/Bluetooth/systeme peuvent contenir des identifiants
 et des informations d'autres appareils/apps : examinez le ZIP et envoyez-le
@@ -122,6 +125,7 @@ $zip = Join-Path $OutputDirectory "$name.zip"
 
 Write-Host 'Collecte en lecture seule. Les applications et les reglages ne seront pas modifies.'
 try {
+    Save-Read -Name 'exported-report.txt' -Arguments @('shell', 'cat', '/sdcard/Android/data/com.nordicrower.app/files/diagnostics/latest-report.txt')
     foreach ($file in @('discovery.txt', 'status.txt', 'journal.txt', 'journal-1.txt', 'journal-2.txt')) {
         Save-Read -Name $file -Arguments @('shell', 'run-as', 'com.nordicrower.app', 'cat', "files/diagnostics/$file")
     }
@@ -148,11 +152,14 @@ try {
     Write-Warning 'Collecte incomplete ; le rapport partiel reste utile.'
 }
 $summary = @"
-NordicRower diagnostic collector v3
+NordicRower diagnostic collector v4
 PC time: $((Get-Date).ToString('o'))
 Unavailable/failed reads: $failed (old rotated journals may legitimately not exist)
 No Android settings/apps/logs/controller targets were changed. No automatic upload.
-run-as requires the experimental debuggable APK. A run-as error is not a hardware capability finding.
+exported-report.txt: user-requested app export; tap Enregistrer les diagnostics immediately before collecting.
+Check its Exported timestamp; this snapshot does not refresh automatically.
+run-as requires an older experimental debuggable APK. Private-read errors are expected on public release builds.
+A run-as error is not a hardware capability finding. Include the app export when using release builds.
 discovery.txt: feature declarations, firmware identity, resistance limits, current targets/modes, errors.
 journal*.txt: persistent app history across restarts (bounded to roughly 3 MiB).
 status.txt: last saved session state, telemetry and BLE notification counters (not guaranteed current after a crash).

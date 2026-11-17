@@ -3,6 +3,7 @@ package com.nordicrower.app
 import android.app.*
 import android.content.Intent
 import android.os.IBinder
+import android.os.SystemClock
 import com.nettarion.hyperborea.core.model.ExerciseData
 import com.nettarion.hyperborea.hardware.fitpro.session.FitProSession
 import com.nettarion.hyperborea.hardware.fitpro.session.SessionState
@@ -33,6 +34,7 @@ class RowerService : Service() {
         RowerLog.usbClaimRecovery = null
         RowerLog.persistStatus()
         RowerLog.busy = true
+        RowerLog.reading = null
         val discoveryMode = intent?.action == "discover"
         RowerLog.discoveryRunning = discoveryMode
         try {
@@ -103,6 +105,8 @@ class RowerService : Service() {
                                 RowerLog.w("Telemetry", "Live snapshot unavailable; not publishing cached values")
                                 if (frames > 0) {
                                     RowerLog.state = "Flux de mesures interrompu"
+                                    RowerLog.reading = RowerLog.reading?.copy(
+                                        atMillis = SystemClock.elapsedRealtime() - RowerStream.STALE_AFTER_MS - 1)
                                     lastDropReason = "Live snapshot unavailable"
                                 }
                             }
@@ -143,9 +147,6 @@ class RowerService : Service() {
 
     private fun publish(data: ExerciseData) {
         samples++
-        RowerLog.metrics = "Puissance : ${data.power ?: "indisponible"} W\n" +
-            "Cadence : ${data.strokeRate ?: "indisponible"} coups/min\n" +
-            "Coups : ${data.strokeCount ?: "indisponibles"}"
         val reason = RowerFrames.rejectionReason(data)
         if (reason != lastDropReason) {
             RowerLog.i("Telemetry", "Frame availability: ${reason ?: "COMPLETE"}")
@@ -164,11 +165,12 @@ class RowerService : Service() {
             }
         }
         RowerFrames.encode(data)?.let {
+            RowerLog.reading = RowerReading(data.power!!, data.strokeRate!!, data.strokeCount!!, SystemClock.elapsedRealtime())
             frames++
             if (frames == 1L) {
                 RowerLog.i("Telemetry", "First real complete 2AD1 frame=${it.joinToString(" ") { b -> "%02x".format(b.toInt() and 0xff) }}")
             }
-            RowerLog.state = "Données réelles reçues ; Bluetooth NordicRower actif"
+            RowerLog.state = "Mesures reçues"
             ble?.publish(it)
         }
     }
@@ -218,6 +220,8 @@ class RowerService : Service() {
     }
 
     private suspend fun release() {
+        RowerLog.reading = null
+        RowerLog.bleActive = false
         try { ble?.close() } catch (e: Exception) { RowerLog.e("BLE", "Bluetooth release failed", e) }
         ble = null
         val old = session
