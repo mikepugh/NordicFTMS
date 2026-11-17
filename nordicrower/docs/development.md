@@ -38,8 +38,8 @@ For a local signed release, set NORDICROWER_KEYSTORE_PATH and the three signing
 credential environment variables, then run:
 
 ```sh
-./gradlew -PVERSION_NAME=1.0.0 :app:testDebugUnitTest :app:lintRelease :app:assembleRelease
-python3 package-release.py --version 1.0.0
+./gradlew -PVERSION_NAME=1.0.1 :app:testDebugUnitTest :app:lintRelease :app:assembleRelease
+python3 package-release.py --version 1.0.1
 ```
 
 The script validates signature, package, version and non-debuggable status,

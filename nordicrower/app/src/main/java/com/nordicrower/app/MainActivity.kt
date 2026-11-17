@@ -109,7 +109,7 @@ class MainActivity : Activity() {
         disconnectButton = button("Déconnecter", android.R.drawable.ic_media_pause) {
             startService(Intent(this, RowerService::class.java).setAction("stop"))
         }
-        text().text = "Fermez QZ et son Companion avant la connexion. Gardez NordicRower au premier plan pendant la séance.\n" +
+        text().text = "Fermez les autres applications de fitness avant la connexion. Gardez NordicRower au premier plan pendant la séance.\n" +
             "Puissance et coups de rame uniquement ; la résistance reste réglée sur le rameur."
         button("Partager les diagnostics", android.R.drawable.ic_menu_share) { shareDiagnostics() }
         button("Enregistrer les diagnostics", android.R.drawable.ic_menu_save) {
@@ -280,7 +280,7 @@ class MainActivity : Activity() {
                 "les watts cibles ou l'état de la séance. Un rapport sera enregistré automatiquement, même en cas d'échec."
                 else "Wolf/iFIT peut rester activé. NordicRower essaiera l'accès USB et initialisera une séance. " +
                     "Gardez NordicRower au premier plan pendant la séance. " +
-                    "Fermez QZ et son Companion avant de continuer. Si nécessaire, un guide vous permettra de forcer l'arrêt de Wolf/iFIT.")
+                    "Fermez les autres applications de fitness avant de continuer. Si nécessaire, un guide vous permettra de forcer l'arrêt de Wolf/iFIT.")
             .setNegativeButton("Annuler", null).setPositiveButton(if (probe) "Lancer le diagnostic" else "Connecter") { _, _ ->
                 startForegroundService(Intent(this, RowerService::class.java).setAction(action))
             }.show()

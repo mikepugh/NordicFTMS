@@ -15,7 +15,7 @@ SIGNER = "c179debd870edfe6ed0602bea2bb929b87160a97f51013f537c77f0cb4874d76"
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--version", default="1.0.0")
+    parser.add_argument("--version", default="1.0.1")
     parser.add_argument("--apk", type=Path, default=ROOT / "app/build/outputs/apk/release/app-release.apk")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "build/release")
     parser.add_argument("--build-tools", type=Path,
