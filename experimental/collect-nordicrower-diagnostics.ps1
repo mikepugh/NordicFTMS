@@ -26,7 +26,7 @@ uniquement au support, pas dans une issue publique GitHub.
 
 Les erreurs et les fichiers manquants sont conserves. Une absence de donnees
 n'est pas une preuve d'absence de capacite. Les notifications Bluetooth
-terminees ne prouvent pas que EXR/RowerTrain a interprete les valeurs.
+terminees ne prouvent pas que l'application receptrice a interprete les valeurs.
 .PARAMETER AdbPath
 Chemin de adb.exe (par defaut : dossier du script, dossier courant, puis PATH).
 .PARAMETER Serial
@@ -142,8 +142,6 @@ try {
     Save-Read -Name 'wolf-disabled.txt' -Arguments @('shell', 'pm', 'list', 'packages', '-d', 'com.ifit.standalone')
     Save-Read -Name 'wolf-package.txt' -Arguments @('shell', 'dumpsys', '-t', '10', 'package', 'com.ifit.standalone')
     Save-Read -Name 'wolf-services.txt' -Arguments @('shell', 'dumpsys', '-t', '10', 'activity', 'services', 'com.ifit.standalone')
-    Save-Read -Name 'qz-package.txt' -Arguments @('shell', 'dumpsys', '-t', '10', 'package', 'org.cagnulen.qdomyoszwift')
-    Save-Read -Name 'qz-services.txt' -Arguments @('shell', 'dumpsys', '-t', '10', 'activity', 'services', 'org.cagnulen.qdomyoszwift')
     Save-Read -Name 'android.txt' -Arguments @('shell', 'getprop', 'ro.build.fingerprint')
     Save-Read -Name 'console-time.txt' -Arguments @('shell', 'date')
 } catch {
@@ -152,7 +150,7 @@ try {
     Write-Warning 'Collecte incomplete ; le rapport partiel reste utile.'
 }
 $summary = @"
-NordicRower diagnostic collector v4
+NordicRower diagnostic collector v5
 PC time: $((Get-Date).ToString('o'))
 Unavailable/failed reads: $failed (old rotated journals may legitimately not exist)
 No Android settings/apps/logs/controller targets were changed. No automatic upload.
@@ -166,10 +164,9 @@ status.txt: last saved session state, telemetry and BLE notification counters (n
 logcat/crash/dumps: recent system state, may contain incidental personal data from other apps/devices.
 wolf-enabled/disabled/package/services: package state and service evidence; enabled or USB permission alone does NOT prove interface ownership.
 usb-*-driver: kernel HID and userspace driver bindings; absent/inaccessible paths are UNKNOWN, not proof that USB is free.
-qz-package/services: competing QZ installation/service evidence; these reads do not start or stop QZ.
 DECLARED_NOT_WRITE_TESTED: candidate feature, NOT proof of write acceptance or native ERG operation.
 NOT_DECLARED: absent from a complete feature list; UNKNOWN: missing/incomplete reply, never assume unsupported.
-Bluetooth notification completion does not prove EXR/RowerTrain interpreted the rower data.
+Bluetooth notification completion does not prove the receiving app interpreted the rower data.
 Review this ZIP and send it privately with app name/version, test time, and what appeared on screen.
 "@
 [System.IO.File]::WriteAllText((Join-Path $folder 'collection.txt'), $summary, (New-Object System.Text.UTF8Encoding($false)))
